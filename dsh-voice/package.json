@@ -1,0 +1,44 @@
+{
+  "name": "dsh-voice",
+  "version": "0.1.0",
+  "description": "语音输入插件：客户端 UI 麦克风按钮 → 浏览器原生录音 → 转文字 → 填入输入框（支持 AI 增强扩充总结，agent voice 编程）",
+  "type": "module",
+  "main": "src/index.ts",
+  "files": [
+    "src/index.ts",
+    "src/swift/voicekit.swift",
+    "dist/client.js",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "exports": {
+    ".": "./src/index.ts",
+    "./client": "./dist/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  },
+  "scripts": {
+    "build": "node build-client.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@deepseek-ai/cordis": "4.0.1",
+    "@deepseek-ai/dsh-llm": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-tools": "0.1.0-rc.6",
+    "@deepseek-ai/schemastery": "3.18.1"
+  }
+}

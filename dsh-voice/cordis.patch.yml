@@ -1,0 +1,5 @@
+# dsh-voice 组合包 patch 层：把宿主插件行插入 profile
+- insert:
+    - id: voice
+      name: dsh-voice
+      config: {}

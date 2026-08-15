@@ -1,0 +1,25 @@
+# 依赖
+node_modules/
+
+# 构建产物（dist/client.js 由各插件 `npm run build` 生成）
+dist/
+
+# 运行时状态 / 数据
+storage.json
+*.log
+npm-debug.log*
+
+# 环境变量与密钥
+.env
+.env.*
+*.pem
+*.key
+*.p12
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 编辑器 / IDE
+.idea/
+.vscode/

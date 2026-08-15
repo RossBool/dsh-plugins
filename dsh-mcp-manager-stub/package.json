@@ -1,0 +1,22 @@
+{
+  "name": "dsh-mcp-manager",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "占位包：接管旧客户端条目 id（dsh-mcp-manager），保持 boot 清单干净（无操作）",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime"
+      ]
+    }
+  },
+  "license": "MIT"
+}

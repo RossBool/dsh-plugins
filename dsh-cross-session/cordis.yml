@@ -1,0 +1,20 @@
+# dsh-cross-session 挂载层：启动 dsh 时通过 --patch 本文件加载插件
+# 用法：dsh web --patch /Users/zhoujunren/Code/LocalCode/dsh-cross-session/cordis.yml
+# 也可把下面的 insert 条目合并进 profile 或 home 级的 cordis.patch.yml
+- insert:
+    - id: cross-session
+      # 插件路径必须用绝对路径（--patch 覆盖层里的相对路径是相对 profile 目录解析的）
+      name: '/Users/zhoujunren/Code/LocalCode/dsh-cross-session/src/index.ts'
+      # 可选配置（全部有默认值，按需开启；配置变更会热替换插件实例）：
+      # config:
+      #   enabled: true               # 插件总开关
+      #   allowSessionIds: []         # 允许交互的会话白名单（空 = 不限）
+      #   denySessionIds: []          # 拒绝交互的会话黑名单
+      #   allowSelf: false            # 是否允许会话给自己发消息
+      #   maxRelayChars: 8000         # 发送消息最大字符数
+      #   maxRecallChars: 30000       # 读取/回复/搜索输出最大字符数
+      #   maxReadMessages: 50         # session_read 最多读取条数
+      #   maxSearchResults: 20        # session_search 最多命中数
+      #   maxSearchSnippetChars: 300  # 搜索片段最大字符数
+      #   askTimeoutMs: 300000        # session_ask 等待超时（毫秒）
+      #   autoResume: false           # 是否自动恢复非运行中的持久化会话

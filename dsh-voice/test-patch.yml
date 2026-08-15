@@ -1,0 +1,5 @@
+# 仅用于冒烟测试（绝对路径挂载宿主插件），正式安装走 dsh plugin add
+- insert:
+    - id: voice
+      name: /Users/zhoujunren/Code/LocalCode/dsh-voice/src/index.ts
+      config: {}

@@ -1,0 +1,12 @@
+{
+  "name": "prompt-enhancer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "提示词增强插件（服务端）：enhance_prompt 工具 + /enhance 命令 + 后台增强任务 + 可选自动增强",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  }
+}

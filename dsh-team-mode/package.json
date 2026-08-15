@@ -1,0 +1,38 @@
+{
+  "name": "dsh-team-mode",
+  "version": "0.1.0",
+  "description": "团队模式（team-mode）开关：为协作画布、协作路由等团队协作能力提供显式启停的进程级与会话级开关。其他模式（plan/solo/…）默认不启用这些能力。",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./route": "./route.js",
+    "./client": "./dist/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "route.js",
+    "dist/client.js",
+    "cordis.patch.yml"
+  ],
+  "scripts": {
+    "build": "node build-client.mjs"
+  },
+  "license": "MIT",
+  "keywords": ["dsh", "dsh-plugin", "deepseek-harness", "team-mode", "mode", "toggle", "collaboration"],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-primitives"
+      ],
+      "platform": "web"
+    }
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "name": "dsh-team-plan",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "计划驱动协作引擎：Leader 生成计划 → 确定性状态机 → Worker 子代理 → Verifier 对抗式质量门禁（重试回环），与自由协作路由并存",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test",
+    "gate": "npm run typecheck && node --test"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "file:/Users/zhoujunren/Library/PhpWebStudy/app/nodejs/v22.21.1/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis",
+    "@deepseek-ai/dsh-llm": "file:/Users/zhoujunren/Library/PhpWebStudy/app/nodejs/v22.21.1/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm",
+    "@deepseek-ai/dsh-commands": "file:/Users/zhoujunren/Library/PhpWebStudy/app/nodejs/v22.21.1/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-commands",
+    "@deepseek-ai/dsh-subagent": "file:/Users/zhoujunren/Library/PhpWebStudy/app/nodejs/v22.21.1/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-subagent",
+    "@deepseek-ai/dsh-agent": "file:/Users/zhoujunren/Library/PhpWebStudy/app/nodejs/v22.21.1/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-agent",
+    "@deepseek-ai/dsh-home-paths": "file:/Users/zhoujunren/Library/PhpWebStudy/app/nodejs/v22.21.1/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-home-paths",
+    "@deepseek-ai/dsh-atomic-write": "file:/Users/zhoujunren/Library/PhpWebStudy/app/nodejs/v22.21.1/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-atomic-write",
+    "@deepseek-ai/schemastery": "file:/Users/zhoujunren/Library/PhpWebStudy/app/nodejs/v22.21.1/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/schemastery",
+    "@types/node": "^22.20.1",
+    "typescript": "^5.9.3"
+  },
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "team",
+    "plan",
+    "orchestration",
+    "state-machine",
+    "verifier"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "files": [
+    "src",
+    "cordis.patch.yml",
+    "DESIGN.md",
+    "research"
+  ]
+}

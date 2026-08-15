@@ -1,0 +1,23 @@
+{
+  "name": "prompt-enhancer-ui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "提示词增强插件的 Web UI 客户端（输入框工具栏图标按钮）",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ],
+      "platform": "web"
+    }
+  }
+}

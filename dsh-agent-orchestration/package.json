@@ -1,0 +1,45 @@
+{
+  "name": "dsh-agent-orchestration",
+  "version": "0.3.0",
+  "description": "Agent 协作与编排（DeepSeek Harness 插件）：协作画布（React Flow）+ 自然语言协作路由层，仅由 team 预设（团队模式）以 config.teamMode: true 挂载",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./route": "./route.js",
+    "./client": "./dist/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "route.js",
+    "dist/client.js",
+    "cordis.patch.yml"
+  ],
+  "scripts": {
+    "build": "node build-client.mjs"
+  },
+  "dependencies": {
+    "@xyflow/react": "12.11.3"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  },
+  "license": "MIT",
+  "keywords": ["dsh", "dsh-plugin", "deepseek-harness", "orchestration", "multi-agent", "canvas", "react-flow", "team-mode"],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-primitives",
+        "@deepseek-ai/dsh-client-ui-workflow-run"
+      ],
+      "platform": "web"
+    }
+  }
+}

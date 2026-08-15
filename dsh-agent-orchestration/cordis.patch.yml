@@ -1,0 +1,14 @@
+# dsh-agent-orchestration：宿主三行
+#  1. team-mode  —— 注册 orchestration-team-mode 设置命名空间与团队模式服务
+#  2. host       —— 画布数据服务 + 编排 HTTP 路由（/data /detail）
+#  3. route      —— 自然语言协作路由层（pre-step 瀑布，团队模式 guard 之后才生效）
+# 客户端经 dsh.client manifest 由 Web boot graph 自动注入。
+- insert:
+    # TODO(team-mode): team-mode.js 尚未创建（canvas-v2 重构中），exports 也未声明 ./team-mode。
+    # 模块补齐后恢复下面两行，并在 package.json exports 中加上 "./team-mode": "./team-mode.js"
+    # - id: orchestration-team-mode
+    #   name: dsh-agent-orchestration/team-mode
+    - id: orchestration-host
+      name: dsh-agent-orchestration
+    - id: orchestration-route
+      name: dsh-agent-orchestration/route

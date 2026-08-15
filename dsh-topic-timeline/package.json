@@ -1,0 +1,24 @@
+{
+  "name": "dsh-topic-timeline",
+  "version": "0.2.0",
+  "description": "话题时间轴侧栏（Topic Tick Axis）client plugin for dsh web: a blue vertical tick rail over the conversation with ZCode-style date grouping (dots + hover group labels), mini-card tooltips and generating-state gradient/pulse motion.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "test": "node test/grouping.test.mjs"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime"
+      ]
+    }
+  },
+  "license": "MIT"
+}

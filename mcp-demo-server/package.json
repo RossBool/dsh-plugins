@@ -1,0 +1,5 @@
+{
+  "name": "mcp-demo-server",
+  "private": true,
+  "type": "module"
+}
