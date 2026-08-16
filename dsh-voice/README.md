@@ -30,6 +30,8 @@
 1. **英文直接识别输出**（默认）：`asr.language` 设为 `en-US`（或工具 `language` 参数传 `en-US`）→ 用英文识别器直接识别英文 → **只做英文拼写/大小写规范化**（如 `Doker`→`Docker`、`python`→`Python`），**不做中文谐音「翻译」**，原样输出识别结果。
 2. **英文 AI 增强**：在路径 1 基础上开启 `enhance.enabled: true` → 调用 LLM 对英文转写做**润色、补全、优化表达**（修正语法/标点、补全残缺句、让表达更自然专业），保持原意，输出增强后的英文文本。
 
+**发音相近替代纠偏**（第三类识别错误）：ASR 会把词汇表外的领域专有名词识别成发音相近的常见词/缩写（拼写差异大，编辑距离失效）——如「DeepSeek」→ `DC`、「Harness」→ `Honey`。这类错误通过 `terms.ts` 内置的 `EN_MISCORRECTION` 精确映射纠正（`dc`→`DeepSeek`、`honey`→`Harness`），并扩充了 DSH 生态专有名词词库（Harness/Cordis/Schemastery/Cosmokit/Typert）；AI 增强路径的 prompt 也会据上下文二次纠偏。
+
 中文（`zh-*`）路径保持原有行为：谐音纠偏（「道可」→ Docker）+ 结构化编程任务增强。
 
 ## 架构

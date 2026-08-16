@@ -12,9 +12,9 @@
 // 说明：
 // - 谐音表按 wrong 长度降序应用（先长后短），避免「金仓哈勃」被「金仓」先替换。
 // - 幂等：替换后的标准拼写不会再被匹配（表内不含标准拼写本身）。
-// - 模糊匹配只在 token 长度 ≥5、首字母相同、编辑距离 ≤1、最多漏 1 字母时生效，
+// - 英文模糊匹配只在 token 长度≥4、前 2 字符相同、编辑距离≤1、最多漏 1 字母时生效，
 //   以控制误伤（普通英文单词/短缩写不会被改）。
-// - 用户可通过配置 asr.correction.terms 扩展（键=误识别，值=标准拼写），
+// - 用户可通过配置 asr.correction.terms 扩展谐音表、asr.correction.mishear 覆盖英文误识别映射，
 //   或 asr.correction.enabled: false 整体关闭。
 
 export const DEFAULT_TERMS: Record<string, string> = {
@@ -61,9 +61,9 @@ export const DEFAULT_TERMS: Record<string, string> = {
   '弗拉特': 'Flutter',
 }
 
-// 标准术语词库：用于英文 token 的精确大小写规范化 + 保守拼写纠错。
-// 只放专有名词/框架名（不放全大写缩写与普通英文词，避免把 rest/set/next 等普通词改掉）。
-const STANDARD_TERMS: string[] = [
+// 模糊匹配候选词库：可参与编辑距离拼写纠错。只放「拼错也不会和普通词混淆」的专有名词，
+// 避免把 cords→Cordis、typer→Typert 等普通词误改。
+const FUZZY_TERMS: string[] = [
   'Docker', 'Python', 'Git', 'GitHub', 'GitLab', 'React', 'Vue', 'Kubernetes',
   'TypeScript', 'JavaScript', 'Java', 'MySQL', 'PostgreSQL', 'MongoDB', 'Redis',
   'Kafka', 'Nginx', 'Apache', 'Linux', 'Swift', 'Rust', 'Kotlin', 'Ruby', 'Django',
@@ -75,6 +75,23 @@ const STANDARD_TERMS: string[] = [
   'Elixir', 'Erlang', 'Clojure', 'Keras', 'HuggingFace', 'Homebrew', 'GraphQL',
   'gRPC', 'PyCharm', 'WebStorm', 'IntelliJ', 'Confluence', 'GitBook', 'macOS', 'iOS',
 ]
+
+// 仅精确规范化词库（不参与模糊匹配）：DeepSeek Harness（DSH）生态专有名词。
+// 这些词与普通词发音/拼写相近（cords↔Cordis、typer↔Typert），若参与模糊匹配会误伤普通词。
+const EXACT_ONLY_TERMS: string[] = [
+  'Harness', 'Cordis', 'Schemastery', 'Cosmokit', 'Typert',
+]
+
+// 英文「发音相近替代」映射（默认内置）：ASR 把词汇表外的专有名词识别成发音相近的
+// 词汇表内词/缩写（拼写差异大，编辑距离/音码都失效），只能用领域知识做精确 token 匹配纠正。
+// 注意：'dc'/'honey' 是高频多义词（直流电/华盛顿 DC/AC·DC、蜂蜜/昵称）——本插件是
+// DSH 语音编程专用，该语境下它们几乎只指 DeepSeek/Harness，故默认内置；通用场景应通过
+// 配置 asr.correction.mishear 覆盖/删除（值为空字符串 = 删除该项）。
+const DEFAULT_MISHEAR: Record<string, string> = {
+  'dseek': 'DeepSeek',  // DeepSeek → dseek（拼写变体，低误伤）
+  'dc': 'DeepSeek',     // DeepSeek → DC（/diːp siːk/ 被听成 /diː siː/）
+  'honey': 'Harness',   // Harness → Honey（/ˈhɑːrnɪs/ 被听成 /ˈhʌni/）
+}
 
 /** 编辑距离（Levenshtein），用于英文拼写纠错 */
 function levenshtein(a: string, b: string): number {
@@ -96,23 +113,29 @@ function levenshtein(a: string, b: string): number {
 }
 
 /**
- * 规范化一个英文 token：精确匹配（大小写不敏感）→ 词库标准形式；
- * 否则做保守模糊匹配（长度≥4、前 2 字符相同、编辑距离≤1、最多漏 1 字母）。
- * 用「前 2 字符」而非「首字母」匹配，以区分普通词与术语（如 rest 的 "re" vs Rust 的 "ru"），
- * 避免把 rest/set/data/file 等普通英文词改掉。未命中返回原 token。
+ * 规范化一个英文 token：① 发音相近替代映射（精确，优先级最高）；② 词库精确匹配（大小写规范化）；
+ * ③ 保守模糊匹配（拼写纠错，只用 FUZZY_TERMS 候选集）。
+ * 模糊匹配约束：长度≥4、前 2 字符相同、编辑距离≤1、最多漏 1 字母；
+ * 用「前 2 字符」而非「首字母」区分普通词与术语（rest 的 "re" vs Rust 的 "ru"）。
+ * 未命中返回原 token。
  */
-function normalizeToken(token: string): string {
+function normalizeToken(token: string, mishear: Record<string, string>): string {
   const lower = token.toLowerCase()
-  // 精确匹配（大小写规范化）
-  for (const t of STANDARD_TERMS) {
+  // 1. 发音相近替代映射（精确 token 匹配，优先级最高）：dc→DeepSeek、honey→Harness
+  if (mishear[lower]) return mishear[lower]
+  // 2. 词库精确匹配（大小写规范化）：FUZZY_TERMS ∪ EXACT_ONLY_TERMS
+  for (const t of FUZZY_TERMS) {
     if (t.toLowerCase() === lower) return t
   }
+  for (const t of EXACT_ONLY_TERMS) {
+    if (t.toLowerCase() === lower) return t
+  }
+  // 3. 保守模糊匹配（只用 FUZZY_TERMS，不含 EXACT_ONLY_TERMS，避免 cords→Cordis 误伤）
   if (token.length < 4) return token
-  // 保守模糊匹配
   const prefix = lower.slice(0, 2)
   let best: string | null = null
   let bestDist = Infinity
-  for (const t of STANDARD_TERMS) {
+  for (const t of FUZZY_TERMS) {
     const tl = t.toLowerCase()
     if (tl.slice(0, 2) !== prefix) continue
     if (tl.length < token.length) continue // 只允许漏字母，不允许多字母
@@ -123,22 +146,34 @@ function normalizeToken(token: string): string {
   return bestDist <= 1 && best ? best : token
 }
 
-/**
- * 仅英文 token 规范化（大小写 + 拼写纠错），不做中文谐音映射。
- * 用于「英文直接识别」路径：英文语音 → en-US 识别 → 只纠拼写/大小写，不把谐音「翻译」成英文。
- */
-export function normalizeEnglish(text: string): string {
-  if (!text) return text
-  return text.replace(/[A-Za-z][A-Za-z0-9+#.+-]*/g, (token) => normalizeToken(token))
+/** 合并内置误识别映射与用户配置：值为空字符串 = 删除该项 */
+function mergeMishear(user: Record<string, string>): Record<string, string> {
+  const merged: Record<string, string> = { ...DEFAULT_MISHEAR }
+  for (const [k, v] of Object.entries(user ?? {})) {
+    if (v) merged[k.toLowerCase()] = v
+    else delete merged[k.toLowerCase()]
+  }
+  return merged
 }
 
 /**
- * 应用术语纠偏：① 中文谐音映射替换；② 英文 token 规范化（大小写 + 拼写纠错）。
- * 用于中文（zh-*）识别路径：把中文谐音「翻译」回标准英文术语 + 纠英文拼写。
+ * 仅英文 token 规范化（发音相近替代 + 大小写 + 拼写纠错），不做中文谐音映射。
+ * 用于「英文直接识别」路径：英文语音 → en-US 识别 → 只纠专有名词/拼写/大小写。
+ */
+export function normalizeEnglish(text: string, mishear: Record<string, string> = {}): string {
+  if (!text) return text
+  const merged = mergeMishear(mishear)
+  return text.replace(/[A-Za-z][A-Za-z0-9+#.+-]*/g, (token) => normalizeToken(token, merged))
+}
+
+/**
+ * 应用术语纠偏：① 中文谐音映射替换；② 英文 token 规范化（发音相近替代 + 大小写 + 拼写纠错）。
+ * 用于中文（zh-*）识别路径：把中文谐音「翻译」回标准英文术语 + 纠英文专有名词/拼写。
  * @param text 原始转写文本
  * @param extra 用户自定义谐音映射（覆盖/追加内置表）
+ * @param mishear 用户自定义英文误识别映射（覆盖/追加/删除内置 DEFAULT_MISHEAR）
  */
-export function applyTermCorrection(text: string, extra: Record<string, string> = {}): string {
+export function applyTermCorrection(text: string, extra: Record<string, string> = {}, mishear: Record<string, string> = {}): string {
   if (!text) return text
   // 第一层：中文谐音映射
   const terms: Record<string, string> = { ...DEFAULT_TERMS, ...extra }
@@ -150,5 +185,5 @@ export function applyTermCorrection(text: string, extra: Record<string, string> 
     if (out.includes(wrong)) out = out.split(wrong).join(right)
   }
   // 第二层：英文 token 规范化
-  return normalizeEnglish(out)
+  return normalizeEnglish(out, mishear)
 }

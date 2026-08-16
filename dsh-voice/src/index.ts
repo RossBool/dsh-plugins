@@ -29,7 +29,7 @@ export interface Config {
     language: string
     http: { baseURL: string; apiKey: string; model: string }
     whisperCli: { command: string; model: string }
-    correction: { enabled: boolean; terms: Record<string, string> }
+    correction: { enabled: boolean; terms: Record<string, string>; mishear: Record<string, string> }
   }
   enhance: { enabled: boolean; provider: string; model: string; language: string }
   tts: { enabled: boolean; voice: string; beep: boolean }
@@ -70,6 +70,8 @@ export const Config: Schema<Config> = Schema.object({
     correction: Schema.object({
       enabled: Schema.boolean().default(true),
       terms: Schema.dict(Schema.string()).default({}),
+      // 英文误识别映射（发音相近替代，如 dc→DeepSeek、honey→Harness）；值为空字符串 = 删除内置项
+      mishear: Schema.dict(Schema.string()).default({}),
     }).default({}),
   }).default({}),
   enhance: Schema.object({
@@ -97,7 +99,7 @@ export const Config: Schema<Config> = Schema.object({
 
 const ENHANCE_SYSTEM = `你是「语音编程编译器」，把语音转写文本转换为清晰、完整、可直接执行的编程任务描述。
 规则：
-1. 修正语音识别错误（谐音、同音字、吞字），尤其是技术术语。注意：常见谐音（如「派森→Python」「金仓→Git」「扎哇→Java」「麦斯扣→MySQL」）已由系统确定性纠偏处理，请只修正其余未被覆盖的识别错误；不要把普通中文（如「给他」「道可」）强行改成英文术语。
+1. 修正语音识别错误（谐音、同音字、吞字），尤其是技术术语。注意：常见谐音（如「派森→Python」「金仓→Git」「扎哇→Java」「麦斯扣→MySQL」）已由系统确定性纠偏处理，请只修正其余未被覆盖的识别错误；不要把普通中文（如「给他」「道可」）强行改成英文术语。英文专有名词若被识别成发音相近的普通词/缩写，也要据上下文纠正（用领域知识判断，而非机械替换）。
 2. 保留原意，不要添加用户没有提到的新需求；不确定的地方标注「（此处语音不清，疑似…）」。
 3. 把口语化、跳跃的表达扩充为结构化指令：任务目标、具体要求、约束与注意事项、建议执行步骤。
 4. 输出 Markdown，按以下固定结构：
@@ -120,7 +122,8 @@ Rules:
 1. Fix grammar, spelling, and punctuation errors.
 2. Complete incomplete or fragmented sentences so they read naturally.
 3. Improve wording to be clearer, more natural and professional — do not add new facts or change the intent.
-4. Output ONLY the enhanced English text, with no preamble, explanation, markdown, or quotes.`
+4. Fix misrecognized proper nouns and domain terms that sound similar (e.g. a product or framework name heard as a common word or abbreviation). Use surrounding context to decide.
+5. Output ONLY the enhanced English text, with no preamble, explanation, markdown, or quotes.`
 
 /** 判断语言码是否属于英文（en / en-US / en-GB …） */
 function isEnglishLang(lang: string | undefined): boolean {
@@ -291,14 +294,15 @@ class VoiceEngine {
 
   /**
    * 术语纠偏：按识别语言分流。
-   * - 英文（en-*）：只做英文拼写/大小写规范化，不做中文谐音「翻译」（英文直接识别原样输出）。
-   * - 中文及其他：中文谐音映射 + 英文拼写规范化。
+   * - 英文（en-*）：只做英文发音相近替代 + 拼写/大小写规范化，不做中文谐音「翻译」。
+   * - 中文及其他：中文谐音映射 + 英文规范化。
    */
   correct(text: string, language?: string): string {
     if (!this.config.asr.correction?.enabled) return text
     const lang = language ?? this.config.asr.language
-    if (isEnglishLang(lang)) return normalizeEnglish(text)
-    return applyTermCorrection(text, this.config.asr.correction?.terms ?? {})
+    const mishear = this.config.asr.correction?.mishear ?? {}
+    if (isEnglishLang(lang)) return normalizeEnglish(text, mishear)
+    return applyTermCorrection(text, this.config.asr.correction?.terms ?? {}, mishear)
   }
 
   /** 清理 24h 以上的残留录音与上传临时文件（fire-and-forget） */
