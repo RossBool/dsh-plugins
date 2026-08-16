@@ -124,7 +124,17 @@ function normalizeToken(token: string): string {
 }
 
 /**
+ * 仅英文 token 规范化（大小写 + 拼写纠错），不做中文谐音映射。
+ * 用于「英文直接识别」路径：英文语音 → en-US 识别 → 只纠拼写/大小写，不把谐音「翻译」成英文。
+ */
+export function normalizeEnglish(text: string): string {
+  if (!text) return text
+  return text.replace(/[A-Za-z][A-Za-z0-9+#.+-]*/g, (token) => normalizeToken(token))
+}
+
+/**
  * 应用术语纠偏：① 中文谐音映射替换；② 英文 token 规范化（大小写 + 拼写纠错）。
+ * 用于中文（zh-*）识别路径：把中文谐音「翻译」回标准英文术语 + 纠英文拼写。
  * @param text 原始转写文本
  * @param extra 用户自定义谐音映射（覆盖/追加内置表）
  */
@@ -139,7 +149,6 @@ export function applyTermCorrection(text: string, extra: Record<string, string> 
   for (const [wrong, right] of entries) {
     if (out.includes(wrong)) out = out.split(wrong).join(right)
   }
-  // 第二层：英文 token 规范化（匹配含字母、数字、+#.- 的连续串，如 C++ / C# / Node.js）
-  out = out.replace(/[A-Za-z][A-Za-z0-9+#.+-]*/g, (token) => normalizeToken(token))
-  return out
+  // 第二层：英文 token 规范化
+  return normalizeEnglish(out)
 }

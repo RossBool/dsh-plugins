@@ -11,7 +11,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { BlockAssembler } from '@deepseek-ai/dsh-llm'
 import Schema from '@deepseek-ai/schemastery'
-import { applyTermCorrection } from './terms.ts'
+import { applyTermCorrection, normalizeEnglish } from './terms.ts'
 
 export const name = 'dsh-voice'
 export const inject = ['tools', 'llm']
@@ -113,6 +113,19 @@ const ENHANCE_SYSTEM = `你是「语音编程编译器」，把语音转写文�
 <编号步骤>
 ## 一句话总结
 <一句话>。输出必须从「## 语音原意」开始，不要任何开场白。`
+
+// 英文语音的 AI 增强：润色、补全、优化表达，保持原意（用于 en-* 识别路径）
+const ENHANCE_SYSTEM_EN = `You are an English text enhancer for voice transcription. Improve the given English transcript while preserving its original meaning.
+Rules:
+1. Fix grammar, spelling, and punctuation errors.
+2. Complete incomplete or fragmented sentences so they read naturally.
+3. Improve wording to be clearer, more natural and professional — do not add new facts or change the intent.
+4. Output ONLY the enhanced English text, with no preamble, explanation, markdown, or quotes.`
+
+/** 判断语言码是否属于英文（en / en-US / en-GB …） */
+function isEnglishLang(lang: string | undefined): boolean {
+  return /^en([-_]|$)/i.test(lang ?? '')
+}
 
 interface RecordOutcome { file: string; seconds: number; peakDb: number; speechDetected: boolean; backend: string }
 interface AsrOutcome { text: string; confidence: number; backend: string }
@@ -276,9 +289,15 @@ class VoiceEngine {
     return 'whisper-cli'
   }
 
-  /** 术语纠偏：把 ASR 谐音误识别替换为标准拼写（确定性、幂等，不调 LLM） */
-  correct(text: string): string {
+  /**
+   * 术语纠偏：按识别语言分流。
+   * - 英文（en-*）：只做英文拼写/大小写规范化，不做中文谐音「翻译」（英文直接识别原样输出）。
+   * - 中文及其他：中文谐音映射 + 英文拼写规范化。
+   */
+  correct(text: string, language?: string): string {
     if (!this.config.asr.correction?.enabled) return text
+    const lang = language ?? this.config.asr.language
+    if (isEnglishLang(lang)) return normalizeEnglish(text)
     return applyTermCorrection(text, this.config.asr.correction?.terms ?? {})
   }
 
@@ -416,16 +435,17 @@ Add-Type -AssemblyName System.Windows.Forms
     throw new Error('无法解析 LLM 路由：请在插件配置里设置 enhance.provider / enhance.model，或先在设置中配置默认模型')
   }
 
-  private async enhance(transcript: string, signal?: AbortSignal): Promise<{ enhanced: string; summary: string }> {
+  private async enhance(transcript: string, language: string, signal?: AbortSignal): Promise<{ enhanced: string; summary: string }> {
     if (!this.config.enhance.enabled) return { enhanced: transcript, summary: '' }
     const route = await this.resolveLlmRoute()
-    const lang = this.config.enhance.language === 'auto' ? '' : this.config.enhance.language
-    const hint = lang ? `\n\n（增强输出语言：${lang === 'zh' ? '中文' : 'English'}）` : ''
+    // 英文语音走润色增强（保持原意、优化表达），中文走结构化编程任务增强
+    const isEn = isEnglishLang(language)
+    const system = isEn ? ENHANCE_SYSTEM_EN : ENHANCE_SYSTEM
     const stream = this.ctx.llm.stream({
       provider: route.provider,
       model: route.model,
-      system: ENHANCE_SYSTEM,
-      messages: [{ role: 'user', content: [{ type: 'text', text: transcript + hint }] }],
+      system,
+      messages: [{ role: 'user', content: [{ type: 'text', text: transcript }] }],
       temperature: 0.3,
       maxTokens: 1600,
       signal,
@@ -437,6 +457,10 @@ Add-Type -AssemblyName System.Windows.Forms
       throw new Error(`LLM 增强失败: ${finish.failure?.message ?? finish.kind}`)
     }
     const text = assembler.blocks().filter((b: any) => b.type === 'text').map((b: any) => b.text).join('')
+    if (isEn) {
+      // 英文增强：全文即增强结果，无 summary 结构
+      return { enhanced: text.trim() || transcript, summary: '' }
+    }
     const m = text.match(/## 一句话总结\s*\n([\s\S]+?)(?:\n## |$)/)
     const summary = (m ? m[1] : '').trim().replace(/^#+\s*/, '')
     return { enhanced: text.trim() || transcript, summary }
@@ -487,11 +511,11 @@ Add-Type -AssemblyName System.Windows.Forms
       const rec = await this.record(durationSec, signal)
       if (!rec.speechDetected) throw new Error('未检测到语音，请重试或检查麦克风权限（系统设置 → 隐私与安全性 → 麦克风）')
       const asr = await this.runAsr(rec.file, language, signal)
-      const transcript = this.correct(asr.text)
+      const transcript = this.correct(asr.text, language)
       let enhanced = ''
       let summary = ''
       if (this.config.enhance.enabled) {
-        const e = await this.enhance(transcript, signal)
+        const e = await this.enhance(transcript, language, signal)
         enhanced = e.enhanced
         summary = e.summary
       }
@@ -515,10 +539,10 @@ Add-Type -AssemblyName System.Windows.Forms
       const rec = await this.record(this.config.record.maxDurationSec, signal)
       if (!rec.speechDetected) throw new Error('未检测到语音回答')
       const asr = await this.runAsr(rec.file, language, signal)
-      const answer = this.correct(asr.text)
+      const answer = this.correct(asr.text, language)
       let enhancedAnswer = ''
       if (this.config.enhance.enabled) {
-        const e = await this.enhance(answer, signal)
+        const e = await this.enhance(answer, language, signal)
         enhancedAnswer = e.enhanced
       }
       return { question: args.question, answer, enhancedAnswer, confidence: asr.confidence, durationSec: Math.round(rec.seconds * 10) / 10 }
@@ -528,14 +552,15 @@ Add-Type -AssemblyName System.Windows.Forms
   async transcribeFile(filePath: string, language?: string, signal?: AbortSignal) {
     return await this.enqueue(async () => {
       if (!existsSync(filePath)) throw new Error(`音频文件不存在: ${filePath}`)
-      const asr = await this.runAsr(filePath, (language?.trim() || this.config.asr.language), signal)
-      const text = this.correct(asr.text)
+      const lang = language?.trim() || this.config.asr.language
+      const asr = await this.runAsr(filePath, lang, signal)
+      const text = this.correct(asr.text, lang)
       let enhanced = ''
       let summary = ''
       let enhanceWarning = ''
       if (this.config.enhance.enabled) {
         try {
-          const e = await this.enhance(text, signal)
+          const e = await this.enhance(text, lang, signal)
           enhanced = e.enhanced
           summary = e.summary
         } catch (err: any) {
@@ -546,7 +571,7 @@ Add-Type -AssemblyName System.Windows.Forms
       return {
         text, enhanced, summary, enhanceWarning,
         confidence: asr.confidence, backend: asr.backend,
-        language: language?.trim() || this.config.asr.language,
+        language: lang,
       }
     })
   }
@@ -838,9 +863,9 @@ export function apply(ctx: Context, config: Config) {
                 try { m = JSON.parse(line) } catch { continue }
                 if (m.final) {
                   finalized = true
-                  send({ type: 'final', text: engine.correct(String(m.text ?? '')), confidence: Number(m.confidence ?? 0) })
+                  send({ type: 'final', text: engine.correct(String(m.text ?? ''), lang), confidence: Number(m.confidence ?? 0) })
                 } else if (m.partial !== undefined) {
-                  send({ type: 'partial', text: engine.correct(String(m.partial)) })
+                  send({ type: 'partial', text: engine.correct(String(m.partial), lang) })
                 } else if (m.error) {
                   finalized = true
                   send({ type: 'error', message: String(m.error) })

@@ -23,6 +23,15 @@
 - `voice_transcribe`：转写本地音频文件（wav/aiff/m4a/mp3，自动归一化 16kHz）
 - `voice_status`：语音能力状态检查
 
+## 英文识别的两条处理路径
+
+语音转文字按识别语言自动分流，英文**不做翻译**：
+
+1. **英文直接识别输出**（默认）：`asr.language` 设为 `en-US`（或工具 `language` 参数传 `en-US`）→ 用英文识别器直接识别英文 → **只做英文拼写/大小写规范化**（如 `Doker`→`Docker`、`python`→`Python`），**不做中文谐音「翻译」**，原样输出识别结果。
+2. **英文 AI 增强**：在路径 1 基础上开启 `enhance.enabled: true` → 调用 LLM 对英文转写做**润色、补全、优化表达**（修正语法/标点、补全残缺句、让表达更自然专业），保持原意，输出增强后的英文文本。
+
+中文（`zh-*`）路径保持原有行为：谐音纠偏（「道可」→ Docker）+ 结构化编程任务增强。
+
 ## 架构
 
 ```
@@ -88,7 +97,7 @@ dsh web
       silenceThresholdDb: -40
     asr:
       provider: native       # auto | native | http | whisper-cli（实时转写仅 native 支持，其余后端自动降级为录完上传）
-      language: zh-CN
+      language: zh-CN        # 识别语言；英文场景设 en-US（英文直接识别，不做谐音翻译）
       http:                  # OpenAI 兼容 /audio/transcriptions
         baseURL: https://api.openai.com/v1
         apiKey: ''
@@ -97,10 +106,10 @@ dsh web
         command: whisper-cli -m {model} -f {file} -l {language} --no-timestamps --output-txt
         model: ''
       correction:
-        enabled: true        # 术语纠偏：谐音误识别 → 标准拼写（道可→Docker、派森→Python、金仓→Git…）
+        enabled: true        # 术语纠偏。英文（en-*）只做拼写/大小写规范化；中文（zh-*）做谐音翻译 + 拼写纠错
         terms: {}            # 自定义扩展 {误识别: 标准拼写}；内置表见 src/terms.ts（编程语境，个别词如「卡夫卡→Kafka」有极低误伤，可在此覆盖或整体关闭）
     enhance:
-      enabled: false         # LLM 修正/扩充/总结；默认关闭 = 原样输出识别结果。开启后 provider/model 留空 = 用设置里的默认模型
+      enabled: false         # LLM 增强。默认关闭 = 原样输出。英文（en-*）→ 润色/补全/优化表达；中文（zh-*）→ 结构化编程任务。provider/model 留空 = 用设置里的默认模型
       language: zh
     tts:
       enabled: true          # voice_listen / voice_ask 的语音提示
