@@ -19,6 +19,7 @@
 #### Fixed
 - 发音相近替代识别错误：ASR 把「DeepSeek」识别成「DC」、「Harness」识别成「Honey」。
 - WebSocket 安全与生命周期：握手校验、帧长/并发上限、空闲超时、AbortSignal 预中止、断连自动降级、live 会话泄漏。
+- 录音中途输入框卡住：英文词级 partial 高频 `setDraft` 打爆输入状态机/React 重渲染，改为 150ms trailing 节流 + 录音结束停止 partial 写入（final 独占）。
 
 #### Security
 - `/voice/live` 增加 Origin/握手（Upgrade/Version/Key）校验、帧长上限（8MB）、并发进程上限、客户端掩码校验。

@@ -475,6 +475,11 @@ function VoiceButton(props: any) {
   const draftRef = useRef('')
   // 录音开始前输入框已有的草稿：实时 partial 与最终文本都基于它拼接，直接显示在输入框内
   const baseDraftRef = useRef('')
+  // partial 写输入框的节流（trailing throttle）：英文词级 partial 频率高，逐词 setDraft 会打爆
+  // InputMachine 事务链 + 整个 InputBar 重渲染导致主线程假死，故合并到 ~150ms 一次
+  const partialThrottleRef = useRef<{ timer: any; pending: string | null }>({ timer: null, pending: null })
+  // 是否接受 partial 写入输入框：录音中为 true，录音结束（finish 开始）后置 false，让 final 独占最终填入
+  const acceptingPartialRef = useRef(true)
   const draft = typeof useInput === 'function' ? useInput((s: any) => (s && typeof s.draft === 'string' ? s.draft : '')) : ''
   draftRef.current = draft
 
@@ -499,6 +504,7 @@ function VoiceButton(props: any) {
     return () => {
       mountedRef.current = false
       if (timerRef.current) clearInterval(timerRef.current)
+      if (partialThrottleRef.current.timer) clearTimeout(partialThrottleRef.current.timer)
       abortRef.current?.abort()
       liveRef.current?.close()
       liveRef.current = null
@@ -514,8 +520,35 @@ function VoiceButton(props: any) {
 
   // 把识别文本实时写入输入框：基于「录音开始前草稿」拼接（实时 partial 与最终文本共用，避免重复追加）
   const applyDraft = (text: string) => {
+    if (!inputActions || typeof inputActions.setDraft !== 'function') {
+      console.error('[dsh-voice] inputActions.setDraft 不可用，无法写入输入框（框架注入缺失？）')
+      return
+    }
     const base = baseDraftRef.current
-    inputActions?.setDraft(base ? base + '\n' + text : text)
+    inputActions.setDraft(base ? base + '\n' + text : text)
+  }
+
+  // 节流后的 partial 写入：合并 ~150ms 内的多次 partial，只写最后一次，降低状态机/React 压力。
+  // 注：partial 走 setDraft 会污染框架输入状态机的 undo 栈（每次 pushTxn 记一条 undo，LOG_LIMIT=100），
+  // 节流只能缓解不能根治；这是「实时进输入框」产品需求 vs 框架 setDraft 副作用的已知权衡——
+  // 若未来需要彻底避免，可改回「独立 preview 状态 + 仅 final 走 setDraft」（但会偏离实时进输入框的诉求）。
+  const applyDraftPartial = (text: string) => {
+    if (!acceptingPartialRef.current) return
+    partialThrottleRef.current.pending = text
+    if (partialThrottleRef.current.timer) return
+    partialThrottleRef.current.timer = setTimeout(() => {
+      partialThrottleRef.current.timer = null
+      const p = partialThrottleRef.current.pending
+      partialThrottleRef.current.pending = null
+      if (p !== null && mountedRef.current && acceptingPartialRef.current) applyDraft(p)
+    }, 150)
+  }
+
+  // 停止接收 partial 并清掉待写的节流文本（录音结束 / 组件卸载时调用）
+  const stopAcceptingPartial = () => {
+    acceptingPartialRef.current = false
+    if (partialThrottleRef.current.timer) clearTimeout(partialThrottleRef.current.timer)
+    partialThrottleRef.current = { timer: null, pending: null }
   }
 
   // blob：录音产物（降级路径用）；sess：实时会话（null = 实时不可用，降级走旧上传）
@@ -524,6 +557,8 @@ function VoiceButton(props: any) {
     setSeconds(0)
     setLevel(0)
     setError('')
+    // 录音已结束：停止 partial 写输入框，清掉待写的节流文本，让 final 独占最终填入
+    stopAcceptingPartial()
     try {
       if (sess) {
         // 实时路径：录音已停止（end 已发），等待最终识别结果，原样填入
@@ -586,6 +621,10 @@ function VoiceButton(props: any) {
     startingRef.current = true
     setError('')
     baseDraftRef.current = draftRef.current // 记录录音前的草稿，实时文字基于它写入输入框
+    // 重新开启 partial 接受 + 清掉上一轮的节流残留（含未触发的 timer）
+    if (partialThrottleRef.current.timer) clearTimeout(partialThrottleRef.current.timer)
+    acceptingPartialRef.current = true
+    partialThrottleRef.current = { timer: null, pending: null }
     setPhase('working') // 权限弹窗期间显示 spinner，不再显得像没反应
     try {
       const h = await startRecording(paramsRef.current)
@@ -595,10 +634,10 @@ function VoiceButton(props: any) {
       setSeconds(0)
       if (timerRef.current) clearInterval(timerRef.current)
       timerRef.current = setInterval(() => setSeconds(s => s + 1), 1000)
-      // 尝试建立实时转写会话：边录边出字（实时写入输入框）；失败则降级为录完一次性上传
+      // 尝试建立实时转写会话：边录边出字（节流写入输入框）；失败则降级为录完一次性上传
       try {
         const sess = await openLiveSession(paramsRef.current.language, (t) => {
-          if (mountedRef.current) applyDraft(t)
+          if (mountedRef.current) applyDraftPartial(t)
         })
         liveRef.current = sess
         h.setOnPcm(pcm => sess.sendPcm(pcm))
@@ -620,6 +659,7 @@ function VoiceButton(props: any) {
       }).catch((err: any) => {
         if (timerRef.current) clearInterval(timerRef.current) // 拒绝路径同样要清计时器，否则重试会双计时
         timerRef.current = null
+        stopAcceptingPartial()
         liveRef.current?.close()
         liveRef.current = null
         if (mountedRef.current) {
@@ -628,6 +668,7 @@ function VoiceButton(props: any) {
         }
       })
     } catch (err: any) {
+      stopAcceptingPartial()
       showError(`无法开始录音：${err?.message ?? err}`)
       setPhase('idle')
     } finally {
