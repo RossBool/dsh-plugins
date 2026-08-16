@@ -654,10 +654,15 @@ export function apply(ctx, config) {
     res.end(JSON.stringify(payload))
   }
 
+  // 同源防护：拒绝跨站浏览器请求（CSRF / DNS rebinding 缓解）。
+  // 非浏览器客户端（curl 等）不携带 sec-fetch-site，按同机放行。
+  const isCrossSite = (req) => !!(req.headers && req.headers['sec-fetch-site'] === 'cross-site')
+
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
     path: '/plugins/dsh-agent-orchestration/data',
     handler: async (req, res) => {
+      if (isCrossSite(req)) { json(res, { error: 'forbidden' }, 403); return }
       try {
         const url = new URL(req.url ?? '/', 'http://x')
         const rootId = url.searchParams.get('root') || undefined
@@ -670,6 +675,7 @@ export function apply(ctx, config) {
     kind: 'exact',
     path: '/plugins/dsh-agent-orchestration/stream',
     handler: async (req, res) => {
+      if (isCrossSite(req)) { json(res, { error: 'forbidden' }, 403); return }
       if (req.method !== 'GET') { json(res, { error: 'method not allowed' }, 405); return }
       const url = new URL(req.url ?? '/', 'http://x')
       const rootId = url.searchParams.get('root') || undefined
@@ -709,6 +715,7 @@ export function apply(ctx, config) {
     kind: 'exact',
     path: '/plugins/dsh-agent-orchestration/detail',
     handler: async (req, res) => {
+      if (isCrossSite(req)) { json(res, { error: 'forbidden' }, 403); return }
       try {
         const url = new URL(req.url ?? '/', 'http://x')
         const rootId = url.searchParams.get('root') || undefined
@@ -722,6 +729,7 @@ export function apply(ctx, config) {
     kind: 'exact',
     path: '/plugins/dsh-agent-orchestration/team-mode',
     handler: async (req, res) => {
+      if (isCrossSite(req)) { json(res, { error: 'forbidden' }, 403); return }
       try {
         // 团队模式状态快照：本路由只在 config.teamMode === true 时注册，
         // 所以能访问到就等价于「团队模式已开启」。

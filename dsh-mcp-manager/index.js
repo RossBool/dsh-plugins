@@ -15,8 +15,8 @@ import {
   Config as McpClientConfig,
   apply as mcpClientApply,
 } from '@deepseek-ai/dsh-mcp-client'
-import { appendFileSync } from 'node:fs'
-const trace = (line) => { try { appendFileSync('/tmp/mcp-manager-trace.log', new Date().toISOString() + ' ' + line + '\n') } catch {} }
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 export const name = 'dsh-mcp-manager'
 
@@ -104,12 +104,16 @@ function fingerprint(spec) {
   return JSON.stringify(spec)
 }
 
-/** 首次启动时植入的演示服务器（写入用户层，UI 里可见、可删）。 */
+/** 首次启动时植入的演示服务器（写入用户层，UI 里可见、可删）。
+ *  路径可移植：默认用当前 Node + 与本插件同级的 mcp-demo-server，
+ *  可用 MCP_DEMO_NODE / MCP_DEMO_SERVER 环境变量覆盖（不硬编码机器路径）。 */
+const here = dirname(fileURLToPath(import.meta.url))
+const demoServerPath = process.env.MCP_DEMO_SERVER || resolve(here, '../mcp-demo-server/server.js')
 const DEMO_SERVER = {
   transport: 'stdio',
-  command: '/Users/zhoujunren/Library/PhpWebStudy/app/nodejs/v22.21.1/bin/node',
-  args: ['/Users/zhoujunren/.dsh/profiles/plugins/mcp-demo-server/server.js'],
-  cwd: '/Users/zhoujunren/.dsh/profiles/plugins/mcp-demo-server',
+  command: process.env.MCP_DEMO_NODE || process.execPath,
+  args: [demoServerPath],
+  cwd: dirname(demoServerPath),
   env: {},
   toolCallTimeoutMs: 60000,
   enabled: true,
@@ -139,7 +143,6 @@ export function apply(ctx, config) {
    * 同一名称的变更先等待旧实例完全卸载（释放 serverName 预约）再挂载新实例。
    */
   function reconcile(next) {
-    trace('reconcile: servers=' + Object.keys(next?.servers ?? {}).join(',') + ' zai.enabled=' + String(next?.servers?.zai?.enabled))
     const run = reconcileChain.then(async () => {
       const servers = next?.servers ?? {}
       const wanted = new Set()
@@ -177,18 +180,15 @@ export function apply(ctx, config) {
         }
         const mount = () => {
           entry.lastTry = Date.now()
-          trace('mount: start ' + serverName)
           try {
             // settings 服务返回的配置是冻结对象（frozen），Schemastery 解析时会
             // 向缺失字段写入默认值而抛错（空 env 的 demo 侥幸通过，带 env 的 zai 必炸）。
             // 深拷贝解冻后再交给 mcp-client 的 schema。
             const resolved = toClientConfig(serverName, structuredClone(spec))
-            trace('mount: config OK ' + serverName + ' transport=' + resolved.transport)
             entry.fiber = ctx.plugin(
               { name: 'mcp-client', inject: ['tools'], apply: mcpClientApply },
               resolved,
             )
-            trace('mount: ctx.plugin returned ' + serverName + ' fiber=' + String(entry.fiber !== undefined && entry.fiber !== null))
             entry.fiber.then(
               () => { if (mounted.get(serverName) === entry && entry.state === 'connecting') entry.state = 'ready' },
               (error) => {
@@ -205,7 +205,6 @@ export function apply(ctx, config) {
             entry.state = 'failed'
             entry.error = raw.length > 160 ? raw.slice(0, 160) + '…(已截断)' : raw
             // 注意：schema 错误消息可能包含完整配置（含 env 明文），trace 只记名字与类型
-            trace('mount: CATCH ' + serverName + ' err-type=' + (error?.name ?? typeof error))
             log.warn('MCP 服务器挂载失败:', serverName, '配置校验失败，详情见 /mcp-status')
             retryOnce()
           }
@@ -243,7 +242,6 @@ export function apply(ctx, config) {
    */
   function installNamespace() {
     const settingsService = ctx.root.get('settings')
-    trace('install: ctx.get(settings)=' + String(settingsService !== undefined && settingsService !== null) + '; ctx.root.get(settings)=' + String(ctx.root && ctx.root.get('settings') !== undefined && ctx.root.get('settings') !== null))
     if (!settingsService || typeof settingsService.register !== 'function') {
       log.warn('settings 服务不可用，仅使用 cordis.yml 配置')
       return false
@@ -254,17 +252,14 @@ export function apply(ctx, config) {
         applies: 'live',
         validate: validateServers,
       })
-      trace('register OK; describe-has=' + settingsService.describe().some((d) => String(d.ns) === 'mcp-servers'))
       registeredProvider = settingsService
     } catch (error) {
-      trace('register FAILED: ' + (error?.message ?? error))
       if (String(error?.message ?? error).includes('already registered')) {
         // 命名空间已被另一存活实例持有（热重载竞态/重复 apply）：
         // 认领当前 provider 为已注册，使 heal 的存在性检查保持静默；
         // 待原持有者卸载、注册被按键清理后，heal 会自动接管重装。
         registeredProvider = settingsService
         scope = undefined
-        trace('register: namespace owned elsewhere; standing by for handover')
         log.info('mcp-servers 命名空间由其他实例持有，本实例待命接管')
         return false
       }
@@ -275,7 +270,6 @@ export function apply(ctx, config) {
     }
     live = scope.get()
     scope.watch((next) => {
-      trace('watch fired: zai.enabled=' + String(next?.servers?.zai?.enabled) + ' demo.enabled=' + String(next?.servers?.demo?.enabled))
       live = next
       reconcile(next)
     })

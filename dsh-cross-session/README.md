@@ -87,3 +87,8 @@ npm run typecheck        # tsc 严格类型检查（noEmit）
 
 目录结构：`src/index.ts`（插件入口 + 配置）、`src/relay.ts`（发送/提问）、`src/recall.ts`（列出/读取/搜索）、`src/shared.ts`（公共工具函数）。
 
+## 安全与隐私
+
+- 本插件的工具可读取/搜索**同机全部会话**并向其它会话投递消息，扩大了 agent 的作用半径（跨会话数据面）。被提示注入的 agent 可能借此读取其它会话内容，挂载前请确认信任该 agent。
+- 数据访问均走官方 `sessionQuery` / `agents` 服务，不直接读写磁盘文件，也不外发网络。
+

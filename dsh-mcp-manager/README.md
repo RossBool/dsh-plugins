@@ -57,3 +57,8 @@
 服务器名须满足 `[A-Za-z0-9_-]{1,32}`。
 
 > 配置由 `dsh-mcp-manager-ui` 页面写入，无需手工编辑 settings.yaml。
+
+## 安全说明
+
+- **配置即代码执行**：`servers[*].command`（stdio）会作为可执行程序被启动，`streamable-http.url` 会发起任意 HTTP 请求（含内网）。请只信任能写 `$DSH_HOME/settings.yaml` 的本地用户，不要导入来源不明的 MCP 配置。
+- **明文密钥**：`env` 与 `headers` 中的密钥以明文持久化于 settings.yaml，请留意文件权限。

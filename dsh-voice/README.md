@@ -131,3 +131,5 @@ dsh --profile web --patch ./test-patch.yml --port 3099   # 仅宿主插件
 - 录音音频仅在本机处理：native 转写走 macOS 本地 Speech；上传走 /voice/transcribe 仅限回环地址（同源校验，跨站 origin 拒绝）
 - 音频临时文件用完即删；LLM 增强只发送转写文本
 - 若用 http/whisper-cli 后端，音频会发送到对应服务端点
+- `asr.http.apiKey` 以明文持久化在插件配置（settings.yaml），请留意文件权限
+- whisper-cli 后端已改为**无 shell 的 argv 执行**，并对 `language` 做白名单校验，杜绝命令注入

@@ -177,12 +177,18 @@ class VoiceEngine {
   }
 
   private async has(cmd: string): Promise<boolean> {
-    try {
-      const r = await this.run('sh', ['-c', `command -v "${cmd}"`], { timeoutMs: 5000 })
-      return r.code === 0 && r.stdout.trim().length > 0
-    } catch {
-      return false
+    const target = String(cmd ?? '').trim()
+    if (!target) return false
+    // 绝对/相对路径：直接 stat；否则按 PATH 逐目录查找，全程不经过 shell
+    if (target.includes('/') || target.includes('\\')) {
+      try { return (await stat(target)).isFile() } catch { return false }
     }
+    const pathEnv = process.env.PATH ?? ''
+    for (const dir of pathEnv.split(path.delimiter)) {
+      if (!dir) continue
+      try { if ((await stat(path.join(dir, target))).isFile()) return true } catch { /* 继续下一目录 */ }
+    }
+    return false
   }
 
   private async ensureSwift(): Promise<string> {
@@ -329,11 +335,21 @@ Add-Type -AssemblyName System.Windows.Forms
     }
     if (provider === 'whisper-cli') {
       const cfg = this.config.asr.whisperCli
-      const cmd = cfg.command
-        .split('{file}').join(file)
-        .split('{model}').join(cfg.model)
-        .split('{language}').join(language)
-      const r = await this.run('sh', ['-c', cmd], { signal, timeoutMs: 600000 })
+      const lang = String(language ?? '').trim()
+      // 语言码白名单：仅字母/数字/点/下划线/连字符，杜绝参数与命令注入
+      if (!/^[A-Za-z0-9._-]{1,32}$/.test(lang)) {
+        throw new Error('无效的语言代码：仅允许字母/数字/点/下划线/连字符（1–32 位）')
+      }
+      // 模板按空白拆成 argv，逐个替换占位符后经 spawn(argv) 无 shell 执行
+      const argv = cfg.command
+        .split(/\s+/)
+        .filter((t: string) => t.length > 0)
+        .map((t: string) => t
+          .split('{file}').join(file)
+          .split('{model}').join(cfg.model)
+          .split('{language}').join(lang))
+      if (argv.length === 0) throw new Error('whisper-cli 命令模板为空')
+      const r = await this.run(argv[0], argv.slice(1), { signal, timeoutMs: 600000 })
       if (r.code !== 0) throw new Error(`whisper-cli 转写失败: ${r.stderr.slice(-300)}`)
       const text = r.stdout.trim().split('\n').pop() ?? ''
       if (!text) throw new Error('whisper-cli 没有输出文本')
