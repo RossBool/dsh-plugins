@@ -5,12 +5,14 @@
  */
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
+import { fileURLToPath } from 'node:url'
+import { dirname, resolve } from 'node:path'
 
-const serverPath = new URL('./server.js', import.meta.url).pathname
-const here = new URL('.', import.meta.url).pathname
+const here = dirname(fileURLToPath(import.meta.url))
+const serverPath = resolve(here, 'server.js')
 
 const transport = new StdioClientTransport({
-  command: process.env.MCP_DEMO_NODE ?? '/Users/zhoujunren/Library/PhpWebStudy/app/nodejs/v22.21.1/bin/node',
+  command: process.env.MCP_DEMO_NODE ?? process.execPath,
   args: [serverPath],
   cwd: here,
 })

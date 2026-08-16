@@ -4,13 +4,16 @@
  * Usage: node schema-check.mjs
  */
 import { Config } from '@deepseek-ai/dsh-mcp-client'
+import { fileURLToPath } from 'node:url'
+import { dirname, resolve } from 'node:path'
 
+const here = dirname(fileURLToPath(import.meta.url))
 const resolved = Config({
   transport: 'stdio',
   serverName: 'demo',
-  command: '/Users/zhoujunren/Library/PhpWebStudy/app/nodejs/v22.21.1/bin/node',
-  args: ['/Users/zhoujunren/.dsh/profiles/plugins/mcp-demo-server/server.js'],
-  cwd: '/Users/zhoujunren/.dsh/profiles/plugins/mcp-demo-server',
+  command: process.env.MCP_DEMO_NODE ?? process.execPath,
+  args: [resolve(here, 'server.js')],
+  cwd: here,
   env: {},
   toolCallTimeoutMs: 60000,
   failOnStartupError: false,
