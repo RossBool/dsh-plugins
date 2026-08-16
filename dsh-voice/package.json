@@ -6,6 +6,7 @@
   "main": "src/index.ts",
   "files": [
     "src/index.ts",
+    "src/terms.ts",
     "src/swift/voicekit.swift",
     "dist/client.js",
     "cordis.patch.yml",

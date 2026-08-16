@@ -2,6 +2,7 @@
 // 用法:
 //   voicekit record --out <wav> --seconds <n> [--silence <s>] [--threshold <dB>] [--rate <hz>]
 //   voicekit transcribe --in <audio> --lang <locale>
+//   voicekit stream --lang <locale>          # stdin: 16kHz 16-bit mono PCM → 实时 partial/final JSON lines
 //   voicekit devices
 // 输出: 一行 JSON 到 stdout。
 
@@ -94,6 +95,8 @@ func record(_ args: [String: String]) {
         var file: AVAudioFile? = try AVAudioFile(forWriting: tmpUrl, settings: tmpSettings,
                                    commonFormat: .pcmFormatFloat32, interleaved: false)
         let thresholdLinear = pow(10.0, thresholdDb / 20.0)
+        // silenceStop <= 0 = 禁用静音自动停止（录音只受最大时长约束）
+        let silenceEnabled = silenceStop > 0
         let start = Date()
         var lastVoice = Date()
         var startedVoice = false
@@ -123,12 +126,12 @@ func record(_ args: [String: String]) {
             let elapsed = now.timeIntervalSince(start)
             let silence = now.timeIntervalSince(lastVoice)
             let stop = (elapsed >= maxSeconds)
-                || (startedVoice && elapsed >= minDuration && silence >= silenceStop)
+                || (silenceEnabled && startedVoice && elapsed >= minDuration && silence >= silenceStop)
             if stop && !stopRequested {
                 stopRequested = true
                 queue.async {
-                    input.removeTap(onBus: 0)
                     engine.stop()
+                    input.removeTap(onBus: 0)
                 }
             }
         }
@@ -203,9 +206,6 @@ func transcribe(_ args: [String: String]) {
     guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: lang)) else {
         fail("当前系统不支持该语音识别语言: \(lang)（macOS 需要下载对应语音包）")
     }
-    if recognizer.supportsOnDeviceRecognition {
-        recognizer.supportsOnDeviceRecognition = true
-    }
     recognizer.defaultTaskHint = .dictation
 
     let sem = DispatchSemaphore(value: 0)
@@ -268,6 +268,8 @@ func transcribe(_ args: [String: String]) {
     var finalText = ""
     var confidence: Float = 0
     var errorMsg: String?
+    // SFSpeechRecognizer 回调在 main queue 执行，与下方 main RunLoop 泵循环同线程串行，
+    // 故 finished 标志无跨线程竞争；不要用信号量阻塞主线程，否则回调永不执行。
     var finished = false
 
     // 必须强引用 task，否则被 ARC 提前释放会导致识别中途截断
@@ -303,6 +305,97 @@ func transcribe(_ args: [String: String]) {
          "onDeviceCapable": recognizer.supportsOnDeviceRecognition])
 }
 
+// MARK: - 流式语音识别 (stdin 16kHz 16-bit mono PCM → 实时 partial/final JSON lines)
+
+func stream(_ args: [String: String]) {
+    let lang = args["lang"] ?? "zh-CN"
+    guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: lang)) else {
+        fail("当前系统不支持该语音识别语言: \(lang)（macOS 需要下载对应语音包）")
+    }
+    recognizer.defaultTaskHint = .dictation
+
+    let sem = DispatchSemaphore(value: 0)
+    var status: SFSpeechRecognizerAuthorizationStatus = .notDetermined
+    SFSpeechRecognizer.requestAuthorization { s in
+        status = s
+        sem.signal()
+    }
+    _ = sem.wait(timeout: .now() + 60)
+    guard status == .authorized else {
+        fail("语音识别权限未授权（状态: \(status.rawValue)）。请在 系统设置 → 隐私与安全性 → 语音识别 中授权。")
+    }
+
+    let request = SFSpeechAudioBufferRecognitionRequest()
+    request.shouldReportPartialResults = true
+    request.taskHint = .dictation
+
+    guard let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false) else {
+        fail("无法创建 16kHz 单声道音频格式")
+    }
+
+    // SFSpeechRecognizer 回调在 recognizer.queue（默认 main queue）执行，与下方 main RunLoop
+    // 泵循环同线程串行，故 finalized 标志无跨线程竞争；不要用信号量阻塞主线程，否则回调永不执行。
+    var finalized = false
+    var task: SFSpeechRecognitionTask?
+    task = recognizer.recognitionTask(with: request) { result, error in
+        if let r = result {
+            let text = r.bestTranscription.formattedString.trimmingCharacters(in: .whitespacesAndNewlines)
+            if r.isFinal {
+                var conf: Float = 0
+                var count = 0
+                for seg in r.bestTranscription.segments {
+                    conf += seg.confidence
+                    count += 1
+                }
+                let c = count > 0 ? conf / Float(count) : 0
+                log(["ok": true, "final": true, "text": text,
+                     "confidence": Double(round(c * 1000) / 1000)])
+                finalized = true
+            } else if !text.isEmpty {
+                log(["ok": true, "partial": text, "final": false])
+            }
+        }
+        if let e = error {
+            log(["ok": false, "error": e.localizedDescription])
+            finalized = true
+        }
+    }
+
+    // 从 stdin 读取 16kHz 16-bit 单声道 PCM（小端），逐块 append 给识别器；
+    // EOF（availableData 为空）时结束音频，等待 final 结果。
+    let stdin = FileHandle.standardInput
+    stdin.readabilityHandler = { handle in
+        let data = handle.availableData
+        if data.isEmpty {
+            stdin.readabilityHandler = nil
+            request.endAudio()
+            return
+        }
+        let count = data.count / 2
+        guard count > 0 else { return }
+        let samples: [Float] = data.withUnsafeBytes { raw in
+            let p = raw.bindMemory(to: Int16.self)
+            var out = [Float](repeating: 0, count: count)
+            for i in 0..<count { out[i] = Float(p[i]) / 32768.0 }
+            return out
+        }
+        guard let buf = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(count)) else { return }
+        buf.frameLength = AVAudioFrameCount(count)
+        if let ch = buf.floatChannelData?[0] {
+            for i in 0..<count { ch[i] = samples[i] }
+        }
+        request.append(buf)
+    }
+
+    let deadline = Date().addingTimeInterval(300)
+    while !finalized && Date() < deadline {
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+    }
+    task?.cancel()
+    task = nil
+    if !finalized { fail("语音识别超时（300s）") }
+}
+
 // MARK: - 设备列表
 
 func devices() {
@@ -332,6 +425,7 @@ guard args.count >= 2 else {
 switch args[1] {
 case "record": record(parseArgs())
 case "transcribe": transcribe(parseArgs())
+case "stream": stream(parseArgs())
 case "devices": devices()
 default:
     log(["ok": false, "error": "未知子命令: \(args[1])"])

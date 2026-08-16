@@ -19,7 +19,7 @@ interface ClientParams {
   language: string
 }
 
-const DEFAULT_PARAMS: ClientParams = { fillMode: 'enhanced', maxDurationSec: 60, silenceStopSec: 1.6, silenceThresholdDb: -40, language: 'zh-CN' }
+const DEFAULT_PARAMS: ClientParams = { fillMode: 'transcript', maxDurationSec: 300, silenceStopSec: 0, silenceThresholdDb: -40, language: 'zh-CN' }
 
 // 电平指示条的高度变化系数：中间高两边低，让 5 根小条看起来像在「听」而不是整齐的栅栏
 const EQ_MULT = [0.5, 0.75, 1, 0.7, 0.45]
@@ -30,6 +30,98 @@ interface RecorderHandle {
   /** 录音结束时结算的 Promise：resolve(音频 Blob) / reject(错误) */
   done: Promise<Blob>
   setOnLevel: (cb: ((p: number) => void) | null) => void
+  /** 实时 16kHz Int16 PCM 回调（供 WebSocket 实时转写上传） */
+  setOnPcm: (cb: ((pcm: Int16Array) => void) | null) => void
+  /** 录音停止前的钩子（用于通知实时会话结束音频） */
+  setOnStop: (cb: (() => void) | null) => void
+  /** 查询录音是否已停止（供异步建立的实时会话判断是否错过停止时机） */
+  isStopped: () => boolean
+}
+
+// —— 实时转写 WebSocket 会话 ——
+interface LiveSession {
+  sendPcm: (pcm: Int16Array) => void
+  end: () => void
+  done: Promise<{ text: string; confidence: number }>
+  close: () => void
+}
+
+/**
+ * 打开 /voice/live 实时转写会话：录音期间 sendPcm 上传 16kHz Int16 PCM，
+ * 服务端把 native 流式识别的 partial 结果实时回调 onPartial，录音结束调用 end()，
+ * done 在最终文本（final）返回后 resolve。
+ */
+function openLiveSession(language: string, onPartial: (t: string) => void): Promise<LiveSession> {
+  return new Promise((resolve, reject) => {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const url = `${proto}//${location.host}/voice/live?lang=${encodeURIComponent(language)}`
+    let ws: WebSocket
+    try { ws = new WebSocket(url) } catch (err) { reject(err); return }
+    // outer settled：连接建立（onopen）前失败必须 reject 外层 Promise，
+    // 否则 onClick 里 await openLiveSession 会永久挂起、录音结束后无人结算
+    let settled = false
+    let finished = false
+    const donePromise = new Promise<{ text: string; confidence: number }>((res, rej) => {
+      ws.onmessage = (ev) => {
+        let m: any
+        try { m = JSON.parse(ev.data) } catch { return }
+        if (m.type === 'partial' && typeof m.text === 'string') onPartial(m.text)
+        else if (m.type === 'final') { finished = true; res({ text: String(m.text ?? ''), confidence: Number(m.confidence ?? 0) }) }
+        else if (m.type === 'error') { finished = true; rej(new Error(String(m.message ?? '实时识别失败'))) }
+      }
+      ws.onerror = () => {
+        if (!settled) { settled = true; reject(new Error('实时识别连接失败')) }
+        if (!finished) rej(new Error('实时识别连接失败'))
+      }
+      ws.onclose = () => {
+        if (!settled) { settled = true; reject(new Error('实时识别连接中断')) }
+        if (!finished) rej(new Error('实时识别连接中断'))
+      }
+    })
+    ws.onopen = () => {
+      if (settled) return
+      settled = true
+      resolve({
+        sendPcm: (pcm) => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(pcm.buffer.slice(pcm.byteOffset, pcm.byteOffset + pcm.byteLength))
+          }
+        },
+        end: () => { if (ws.readyState === WebSocket.OPEN) ws.send('end') },
+        done: donePromise,
+        close: () => { try { ws.close() } catch {} },
+      })
+    }
+  })
+}
+
+/**
+ * 因果线性插值重采样到 16kHz（AudioContext 采样率通常 44.1k/48k）。
+ * 用已见样本 [idx-1, idx] 插值（不用未来样本 idx+1），对实时流是因果的，
+ * 代价是恒定 1 个源采样点的滞后（16kHz 下 ~62.5µs），对 ASR 无影响。
+ * 跨帧通过 prev（上一帧末样本）保持相位连续。
+ * 返回 (Float32Array) => Float32Array；step = 源采样率 / 目标采样率。
+ */
+function createResampler(targetRate: number, sourceRate: number) {
+  const step = sourceRate / targetRate
+  let pos = 0
+  let prev = 0
+  let hasPrev = false
+  return (input: Float32Array): Float32Array => {
+    const out: number[] = []
+    const n = input.length
+    while (pos < n) {
+      const idx = Math.floor(pos)
+      const frac = pos - idx
+      const s0 = idx > 0 ? input[idx - 1] : (hasPrev ? prev : input[0])
+      const s1 = input[idx]
+      out.push(s0 + (s1 - s0) * frac)
+      pos += step
+    }
+    pos -= n
+    if (n > 0) { prev = input[n - 1]; hasPrev = true }
+    return new Float32Array(out)
+  }
 }
 
 let activeHandle: RecorderHandle | null = null
@@ -79,6 +171,8 @@ async function startRecording(params: ClientParams): Promise<RecorderHandle> {
 
   const chunks: Int16Array[] = []
   let levelCb: ((p: number) => void) | null = null
+  let pcmCb: ((pcm: Int16Array) => void) | null = null
+  let stopCb: (() => void) | null = null
   let lastVoice = performance.now()
   let startedVoice = false
   let stopped = false
@@ -86,6 +180,7 @@ async function startRecording(params: ClientParams): Promise<RecorderHandle> {
   const threshold = Math.pow(10, params.silenceThresholdDb / 20)
   const maxMs = params.maxDurationSec * 1000
   const silenceMs = params.silenceStopSec * 1000
+  const resample = createResampler(16000, actx.sampleRate)
 
   const onSamples = (input: Float32Array) => {
     if (stopped) return
@@ -99,11 +194,25 @@ async function startRecording(params: ClientParams): Promise<RecorderHandle> {
       sum += v * v
     }
     chunks.push(out)
+    // 实时转写：重采样到 16kHz 后按 Int16 上传
+    if (pcmCb) {
+      const r16 = resample(input)
+      if (r16.length > 0) {
+        const pcm16 = new Int16Array(r16.length)
+        for (let i = 0; i < r16.length; i++) {
+          const v = Math.max(-1, Math.min(1, r16[i]))
+          pcm16[i] = v < 0 ? v * 0x8000 : v * 0x7fff
+        }
+        pcmCb(pcm16)
+      }
+    }
     const rms = Math.sqrt(sum / n)
     levelCb?.(rms)
     const now = performance.now()
     if (rms > threshold) { startedVoice = true; lastVoice = now }
-    if (now - startedAt >= maxMs || (startedVoice && now - lastVoice >= silenceMs)) {
+    // silenceStopSec<=0 = 禁用静音自动停止（默认）：录音只由手动关闭（或 maxDurationSec 硬上限）结束
+    const vadStop = silenceMs > 0 && startedVoice && now - lastVoice >= silenceMs
+    if (now - startedAt >= maxMs || vadStop) {
       stop()
     }
   }
@@ -128,6 +237,7 @@ async function startRecording(params: ClientParams): Promise<RecorderHandle> {
   const stop = () => {
     if (stopped) return
     stopped = true
+    stopCb?.()
     if (noAudioTimer) clearTimeout(noAudioTimer)
     try { proc && (proc.onaudioprocess = null) } catch {}
     cleanup()
@@ -188,6 +298,9 @@ async function startRecording(params: ClientParams): Promise<RecorderHandle> {
     stop: () => { stop() },
     done: stopPromise,
     setOnLevel: (cb) => { levelCb = cb },
+    setOnPcm: (cb) => { pcmCb = cb },
+    setOnStop: (cb) => { stopCb = cb },
+    isStopped: () => stopped,
   }
   activeHandle = handle
   return handle
@@ -236,17 +349,18 @@ const CSS = `
   border: 2px solid currentColor; border-top-color: transparent;
   animation: dsh-voice-rotate .8s linear infinite;
 }
-/* 录音/识别状态卡：浮在按钮上方，时间+电平+下一步提示，全部可见、不依赖 hover */
+/* 录音/识别状态卡：浮在按钮上方，时间+电平+实时转写+下一步提示，全部可见、不依赖 hover */
 .dsh-voice-live {
   position: absolute;
   bottom: calc(100% + 8px);
   right: 0;
   z-index: 50;
   display: inline-flex;
-  align-items: center;
-  gap: 10px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
   width: max-content;
-  max-width: 320px;
+  max-width: 340px;
   padding: 7px 12px;
   border-radius: 10px;
   background: var(--dsw-alias-bg-layer-2, #232529);
@@ -255,6 +369,12 @@ const CSS = `
   font-size: 12px;
   line-height: 1.5;
   animation: dsh-voice-rise .16s cubic-bezier(.16, 1, .3, 1);
+  white-space: nowrap;
+}
+.dsh-voice-live-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
   white-space: nowrap;
 }
 .dsh-voice-eq {
@@ -346,12 +466,15 @@ function VoiceButton(props: any) {
   const [level, setLevel] = useState(0)
   const [error, setError] = useState('')
   const handleRef = useRef<RecorderHandle | null>(null)
+  const liveRef = useRef<LiveSession | null>(null)
   const paramsRef = useRef<ClientParams>({ ...DEFAULT_PARAMS })
   const timerRef = useRef<any>(null)
   const mountedRef = useRef(true)
   const abortRef = useRef<AbortController | null>(null)
   const startingRef = useRef(false)
   const draftRef = useRef('')
+  // 录音开始前输入框已有的草稿：实时 partial 与最终文本都基于它拼接，直接显示在输入框内
+  const baseDraftRef = useRef('')
   const draft = typeof useInput === 'function' ? useInput((s: any) => (s && typeof s.draft === 'string' ? s.draft : '')) : ''
   draftRef.current = draft
 
@@ -377,6 +500,8 @@ function VoiceButton(props: any) {
       mountedRef.current = false
       if (timerRef.current) clearInterval(timerRef.current)
       abortRef.current?.abort()
+      liveRef.current?.close()
+      liveRef.current = null
       handleRef.current?.stop()
       handleRef.current = null
     }
@@ -387,31 +512,61 @@ function VoiceButton(props: any) {
     console.error('[dsh-voice]', msg)
   }
 
-  const finish = async (blob: Blob) => {
+  // 把识别文本实时写入输入框：基于「录音开始前草稿」拼接（实时 partial 与最终文本共用，避免重复追加）
+  const applyDraft = (text: string) => {
+    const base = baseDraftRef.current
+    inputActions?.setDraft(base ? base + '\n' + text : text)
+  }
+
+  // blob：录音产物（降级路径用）；sess：实时会话（null = 实时不可用，降级走旧上传）
+  const finish = async (blob: Blob, sess: LiveSession | null) => {
     setPhase('working')
     setSeconds(0)
     setLevel(0)
     setError('')
     try {
-      abortRef.current = new AbortController()
-      const result = await transcribe(blob, paramsRef.current.language, abortRef.current.signal)
-      const params = paramsRef.current
-      const text = params.fillMode === 'transcript' || !result.enhanced ? result.text : result.enhanced
-      if (text) {
-        const current = draftRef.current
-        inputActions?.setDraft(current ? current + '\n' + text : text)
-        if (result.warning) {
-          console.warn('[dsh-voice]', result.warning)
-          setError(result.warning) // 非致命提示：已填入原始转写
+      if (sess) {
+        // 实时路径：录音已停止（end 已发），等待最终识别结果，原样填入
+        try {
+          const result = await sess.done
+          const text = result.text?.trim()
+          if (!text) throw new Error('没有识别到语音内容，请重试')
+          applyDraft(text)
+        } catch (liveErr: any) {
+          // 实时会话中途断开/失败：手里已有完整录音，降级为一次性上传，不丢结果
+          console.warn('[dsh-voice] 实时转写中断，降级为录完上传：', liveErr?.message ?? liveErr)
+          abortRef.current = new AbortController()
+          const result = await transcribe(blob, paramsRef.current.language, abortRef.current.signal)
+          const text = result.text
+          if (!text) throw new Error('没有识别到语音内容，请重试')
+          applyDraft(text)
+          if (result.warning) {
+            console.warn('[dsh-voice]', result.warning)
+            setError(result.warning)
+          }
         }
       } else {
-        throw new Error('没有识别到语音内容，请重试')
+        // 降级路径：录完一次性上传转写
+        abortRef.current = new AbortController()
+        const result = await transcribe(blob, paramsRef.current.language, abortRef.current.signal)
+        const params = paramsRef.current
+        const text = params.fillMode === 'transcript' || !result.enhanced ? result.text : result.enhanced
+        if (text) {
+          applyDraft(text)
+          if (result.warning) {
+            console.warn('[dsh-voice]', result.warning)
+            setError(result.warning) // 非致命提示：已填入原始转写
+          }
+        } else {
+          throw new Error('没有识别到语音内容，请重试')
+        }
       }
     } catch (err: any) {
       if (err?.name === 'AbortError') return
       showError(err?.message ?? String(err ?? '语音识别失败'))
     } finally {
       abortRef.current = null
+      if (sess) sess.close()
       setPhase('idle')
     }
   }
@@ -430,6 +585,7 @@ function VoiceButton(props: any) {
     }
     startingRef.current = true
     setError('')
+    baseDraftRef.current = draftRef.current // 记录录音前的草稿，实时文字基于它写入输入框
     setPhase('working') // 权限弹窗期间显示 spinner，不再显得像没反应
     try {
       const h = await startRecording(paramsRef.current)
@@ -439,15 +595,33 @@ function VoiceButton(props: any) {
       setSeconds(0)
       if (timerRef.current) clearInterval(timerRef.current)
       timerRef.current = setInterval(() => setSeconds(s => s + 1), 1000)
+      // 尝试建立实时转写会话：边录边出字（实时写入输入框）；失败则降级为录完一次性上传
+      try {
+        const sess = await openLiveSession(paramsRef.current.language, (t) => {
+          if (mountedRef.current) applyDraft(t)
+        })
+        liveRef.current = sess
+        h.setOnPcm(pcm => sess.sendPcm(pcm))
+        h.setOnStop(() => sess.end())
+        // 会话建立期间录音可能已停止（快速点停/到 maxMs）：此时 stopCb 已错过，需补发 end，
+        // 否则 sess.done 永不结算、finish 永久挂起
+        if (h.isStopped()) sess.end()
+      } catch (err: any) {
+        console.warn('[dsh-voice] 实时转写不可用，降级为录完上传：', err?.message ?? err)
+      }
       // 只监听结算 Promise，不再主动调用 stop（旧版 h.stop() 会立即停止录音并上传空音频）
       h.done.then(blob => {
         if (timerRef.current) clearInterval(timerRef.current)
         timerRef.current = null
         handleRef.current = null
-        if (mountedRef.current) finish(blob)
+        const sess = liveRef.current
+        liveRef.current = null
+        if (mountedRef.current) finish(blob, sess)
       }).catch((err: any) => {
         if (timerRef.current) clearInterval(timerRef.current) // 拒绝路径同样要清计时器，否则重试会双计时
         timerRef.current = null
+        liveRef.current?.close()
+        liveRef.current = null
         if (mountedRef.current) {
           setPhase('idle')
           showError(`录音失败：${err?.message ?? err}`)
@@ -463,7 +637,11 @@ function VoiceButton(props: any) {
 
   if (sessionId === undefined) return null
   const fmtTime = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
-  const hintSec = Math.round(paramsRef.current.silenceStopSec * 10) / 10
+  const vadSec = paramsRef.current.silenceStopSec
+  const maxSec = Math.max(5, Math.round(paramsRef.current.maxDurationSec))
+  const stopHint = vadSec > 0
+    ? `停顿 ${Math.round(vadSec * 10) / 10}s 自动停止 · 点击结束`
+    : `点击结束 · 最长 ${fmtTime(maxSec)}`
   return (
     <span className="dsh-voice-wrap">
       <button
@@ -480,16 +658,18 @@ function VoiceButton(props: any) {
       </button>
       {(phase === 'recording' || phase === 'working') && (
         <div className={`dsh-voice-live${phase === 'working' ? ' working' : ''}`} role="status">
-          {phase === 'recording' && (
-            <span className="dsh-voice-eq" aria-hidden="true">
-              {EQ_MULT.map((m, i) => (
-                <i key={i} style={{ height: `${Math.max(4, Math.round(4 + level * 12 * m))}px` }} />
-              ))}
+          <span className="dsh-voice-live-row">
+            {phase === 'recording' && (
+              <span className="dsh-voice-eq" aria-hidden="true">
+                {EQ_MULT.map((m, i) => (
+                  <i key={i} style={{ height: `${Math.max(4, Math.round(4 + level * 12 * m))}px` }} />
+                ))}
+              </span>
+            )}
+            {phase === 'recording' && <span className="dsh-voice-time">{fmtTime(seconds)}</span>}
+            <span className="dsh-voice-hint">
+              {phase === 'recording' ? stopHint : '识别中…（点击可取消）'}
             </span>
-          )}
-          {phase === 'recording' && <span className="dsh-voice-time">{fmtTime(seconds)}</span>}
-          <span className="dsh-voice-hint">
-            {phase === 'recording' ? `停顿 ${hintSec}s 自动停止 · 点击结束` : '识别中…（点击可取消）'}
           </span>
         </div>
       )}

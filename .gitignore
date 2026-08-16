@@ -4,6 +4,9 @@ node_modules/
 # 构建产物（dist/client.js 由各插件 `npm run build` 生成）
 dist/
 
+# 原生编译产物（voicekit.swift 由 swiftc 编译，运行时自动生成）
+dsh-voice/bin/
+
 # 运行时状态 / 数据
 storage.json
 *.log
