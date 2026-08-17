@@ -1,13 +1,12 @@
 # dsh-plugins
 
-DeepSeek Harness（DSH）插件合集：本仓库集中收录我开发的一批 DSH 插件，涵盖协作编排、跨会话交互、团队模式、话题时间轴、语音输入、MCP 管理、提示词增强等能力。
+DeepSeek Harness（DSH）插件合集：本仓库集中收录我开发的一批 DSH 插件，涵盖协作编排、计划驱动协作、话题时间轴、语音输入、MCP 管理、提示词增强等能力。
 
 ## 插件清单
 
 | 目录 | 说明 |
 | --- | --- |
 | `dsh-agent-orchestration` | Agent 协作与编排：协作画布（React Flow）+ 自然语言协作路由层，由 team 预设以 `config.teamMode: true` 挂载 |
-| `dsh-cross-session` | 跨会话交互：会话发现、读取、搜索、消息投递与同步问答 |
 | `dsh-team-plan` | 计划驱动协作引擎：Leader 生成计划 → 确定性状态机 → Worker 子代理 → Verifier 对抗式质量门禁（重试回环） |
 | `dsh-topic-timeline` | 话题时间轴侧栏（Topic Tick Axis）：对话旁蓝色竖向刻度轨 + 日期分组 + 迷你卡片 tooltip |
 | `dsh-voice` | 语音输入：麦克风按钮 → 浏览器原生录音 → 转文字 → 填入输入框（支持 AI 增强扩充） |
@@ -22,7 +21,6 @@ DeepSeek Harness（DSH）插件合集：本仓库集中收录我开发的一批 
 ```
 dsh-plugins/
 ├── dsh-agent-orchestration/   # 协作编排
-├── dsh-cross-session/         # 跨会话
 ├── dsh-team-plan/             # 计划驱动协作引擎
 ├── dsh-topic-timeline/        # 话题时间轴
 ├── dsh-voice/                 # 语音输入
@@ -43,7 +41,7 @@ npm install
 npm run build        # 生成 dist/client.js
 ```
 
-纯服务端插件（如 `dsh-cross-session`、`dsh-team-plan`）可用 `npm run typecheck` / `npm test` 做校验。
+纯服务端插件（如 `dsh-team-plan`）可用 `npm run typecheck` / `npm test` 做校验。
 
 ## 安装到 DSH
 
