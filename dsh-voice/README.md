@@ -10,6 +10,7 @@
 - 录音过程中通过 WebSocket（`/voice/live`）把 16kHz PCM 实时上传，native 后端流式识别并**实时回传转写文字**（录音卡片内实时预览）
 - 识别结束后把**原始识别文本原样填入**输入框（默认 `client.fillMode: transcript`；WS 不可用时自动降级为录完一次性上传）
 - **术语纠偏**（`asr.correction`，默认开启）：转写后把 ASR 的谐音误识别替换为标准拼写（如「道可」→ Docker、「派森」→ Python、「金仓」→ Git），确定性替换、不调 LLM、不改句子结构、实时与一次性路径一致
+- **AI 润色后处理**（`enhance`，默认关闭）：识别出原始文本后，先确定性清理成串/句首句尾的纯语气字（呃/嗯/啊，零语义损失），再调用 LLM 去除语境依赖的口语化表达、口头禅与冗余词（如「就是」「之类的」），同时润色语句、修补语病、增强表达流畅度与逻辑性，输出一段通顺、规范、保留原意的书面文本。`enhance.mode: polish`（默认，中英文通用）即润色；`structured` 为中文结构化编程任务。开启后 `client.fillMode: enhanced` 即填入润色结果
 - 结果提示（info/error）通过输入框 notice 展示
 
 **宿主服务（HTTP/WS 端点）**
@@ -32,7 +33,7 @@
 
 **发音相近替代纠偏**（第三类识别错误）：ASR 会把词汇表外的领域专有名词识别成发音相近的常见词/缩写（拼写差异大，编辑距离失效）——如「DeepSeek」→ `DC`、「Harness」→ `Honey`。这类错误通过 `terms.ts` 内置的 `EN_MISCORRECTION` 精确映射纠正（`dc`→`DeepSeek`、`honey`→`Harness`），并扩充了 DSH 生态专有名词词库（Harness/Cordis/Schemastery/Cosmokit/Typert）；AI 增强路径的 prompt 也会据上下文二次纠偏。
 
-中文（`zh-*`）路径保持原有行为：谐音纠偏（「道可」→ Docker）+ 结构化编程任务增强。
+中文（`zh-*`）路径：谐音纠偏（「道可」→ Docker）+ LLM 增强。增强默认走 `polish` 润色（去口语/口头禅/冗余词、修语病、保留原意、输出单段书面文本）；如需结构化编程任务可设 `enhance.mode: structured`。
 
 ## 架构
 
@@ -111,8 +112,10 @@ dsh web
         enabled: true        # 术语纠偏。英文（en-*）只做拼写/大小写规范化；中文（zh-*）做谐音翻译 + 拼写纠错
         terms: {}            # 自定义扩展 {误识别: 标准拼写}；内置表见 src/terms.ts（编程语境，个别词如「卡夫卡→Kafka」有极低误伤，可在此覆盖或整体关闭）
     enhance:
-      enabled: false         # LLM 增强。默认关闭 = 原样输出。英文（en-*）→ 润色/补全/优化表达；中文（zh-*）→ 结构化编程任务。provider/model 留空 = 用设置里的默认模型
+      enabled: false         # LLM 后处理。默认关闭 = 原样输出（不做后处理）
+      mode: polish           # polish（默认，推荐）= 去口语/口头禅/冗余词 + 润色 + 修语病 + 保留原意（中英文均输出单段通顺文本）；structured = 中文转结构化编程任务（markdown 分节），英文仍走润色
       language: zh
+      # provider/model 留空 = 用设置里的默认模型
     tts:
       enabled: true          # voice_listen / voice_ask 的语音提示
       beep: true
@@ -127,7 +130,7 @@ dsh web
 
 > 说明：`record.silenceStopSec`（服务端录音，voice_listen/voice_ask 用）默认 1.6s，保留静音自动停止——那是 agent 无人值守驱动、没有"手动关闭"按钮的场景，靠停顿收尾；GUI 麦克风按钮（`client.silenceStopSec`）默认 0，完全手动控制。
 >
-> 说明 2：实时转写（`/voice/live`）只回传原始识别文本（`transcript`）；`fillMode: enhanced` 仅在「降级为录完上传」路径生效。`arecord`/`powershell` 后端不支持静音自动停止（只按 `-d` 时长录满），如需 VAD 请用 native/ffmpeg。
+> 说明 2：实时转写（`/voice/live`）在最终结果返回前，若开启 `enhance.enabled` 会先跑一次增强再回传（`final` 消息携带 `enhanced` 字段），因此 `fillMode: enhanced` 在实时路径与「录完上传」降级路径都生效。`arecord`/`powershell` 后端不支持静音自动停止（只按 `-d` 时长录满），如需 VAD 请用 native/ffmpeg。
 
 ## 测试端点
 

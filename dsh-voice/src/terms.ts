@@ -187,3 +187,30 @@ export function applyTermCorrection(text: string, extra: Record<string, string> 
   // 第二层：英文 token 规范化
   return normalizeEnglish(out, mishear)
 }
+
+// —— 口语语气字（零语义损失的确定性清理）——
+//
+// 第一性原理：语音转写的噪声分两类——①「无歧义的纯语气字」（呃/嗯/啊…），其语义负载
+// 趋近于零，可机械删除；②「语境依赖的口头禅/冗余词」（就是/然后/那个/这个/之类的/什么的），
+// 在不同上下文里有语义，机械删除会改意，必须交给 LLM 润色判断。
+// 本函数只处理第①类（纯语气填充字），因此是**无损、幂等**的确定性变换，且只删除：
+//   1) 成串重复的语气字（呃呃、嗯嗯嗯）——disfluency，无语义；
+//   2) 句首的孤立语气字（含其紧邻的句读/空白）。
+// 不删句尾（句尾语气助词如「呢/啊/嘛/哈」表疑问/感叹/肯定，删了会改意），
+// 不碰句中（无分词，避免误伤「那个」「就是」等），不碰语境依赖词。
+
+// 仅纯填充语气字（零语义）；有语义的语气助词（呢/啊/嘛/哈/呀/哟/喂/咦）刻意排除
+const INTERJECTION_CHARS = '呃嗯哦噢诶唉哎哼唔'
+// 语气字两侧允许出现的「非词」字符：空白 + 中文句读 + 省略号/破折号/括号
+const FILLER_BOUNDARY = '\\s，。！？、；：…—·（）()'
+
+/**
+ * 去除口语纯语气字（呃/嗯/哦…），仅做无损清理，用于「润色」路径的确定性预过滤。
+ * 其余口语化去除（就是/然后/那个/之类的）与语病修补、流畅度增强由 LLM 完成。
+ */
+export function stripInterjections(text: string): string {
+  if (!text) return text
+  const run = new RegExp(`[${INTERJECTION_CHARS}]{2,}`, 'g')
+  const lead = new RegExp(`^[${FILLER_BOUNDARY}]*[${INTERJECTION_CHARS}]+[${FILLER_BOUNDARY}]*`, 'g')
+  return text.replace(run, '').replace(lead, '')
+}

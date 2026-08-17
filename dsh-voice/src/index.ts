@@ -11,7 +11,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { BlockAssembler } from '@deepseek-ai/dsh-llm'
 import Schema from '@deepseek-ai/schemastery'
-import { applyTermCorrection, normalizeEnglish } from './terms.ts'
+import { applyTermCorrection, normalizeEnglish, stripInterjections } from './terms.ts'
 
 export const name = 'dsh-voice'
 export const inject = ['tools', 'llm']
@@ -31,7 +31,7 @@ export interface Config {
     whisperCli: { command: string; model: string }
     correction: { enabled: boolean; terms: Record<string, string>; mishear: Record<string, string> }
   }
-  enhance: { enabled: boolean; provider: string; model: string; language: string }
+  enhance: { enabled: boolean; provider: string; model: string; language: string; mode: 'polish' | 'structured' }
   tts: { enabled: boolean; voice: string; beep: boolean }
   client: {
     fillMode: 'transcript' | 'enhanced'
@@ -79,6 +79,9 @@ export const Config: Schema<Config> = Schema.object({
     provider: Schema.string().default(''),
     model: Schema.string().default(''),
     language: Schema.string().default('zh'),
+    // 增强模式：polish = 去口语/口头禅/冗余词 + 润色 + 保留原意（中英文均输出单段通顺文本，本插件主推）；
+    // structured = 中文转结构化编程任务（markdown 分节：语音原意/任务目标/具体要求/约束/建议步骤/一句话总结），英文仍走润色。
+    mode: Schema.union(['polish', 'structured'] as const).default('polish'),
   }).default({}),
   tts: Schema.object({
     enabled: Schema.boolean().default(true),
@@ -125,6 +128,21 @@ Rules:
 4. Fix misrecognized proper nouns and domain terms that sound similar (e.g. a product or framework name heard as a common word or abbreviation). Use surrounding context to decide.
 5. Output ONLY the enhanced English text, with no preamble, explanation, markdown, or quotes.`
 
+// 中文语音的「润色」增强：去口语化表达/口头禅/冗余词 + 润色 + 修语病 + 增强流畅与逻辑，严格保留原意。
+// 与「结构化编程任务」（ENHANCE_SYSTEM）不同：polish 输出单段通顺书面文本，不套任务分节、不扩充需求。
+const ENHANCE_SYSTEM_ZH_POLISH = `你是中文口语转写润色器。把语音识别出的口语文本整理成通顺、规范、保留原意的书面表达。
+
+任务：识别并删除口语化表达、口头禅和冗余词，同时润色语句、修补语病、增强表达的流畅度与逻辑性。
+
+规则：
+1. 删除口语填充词与口头禅：如「呃」「嗯」「啊」「那个」「这个」「就是」「就是说」「然后」「对吧」「是吧」「你知道吗」「怎么说呢」「之类的」「什么什么的」「反正」「基本上」「说实话」「说白了」等——仅当它们不承载实际语义时删除；确实表达语义（如「就是」表强调、「然后」表先后顺序）时保留或改写为恰当的书面连接词。
+2. 删除重复与自我修正：说话人重复起句、先说后改的，只保留最终、正确的表述，不保留废稿。
+3. 修补语病：成分残缺、搭配不当、语序混乱、指代不明，在不改变原意的前提下改正。
+4. 增强流畅度与逻辑：合并松散短句、理顺先后/因果/并列/转折关系、补全残缺句，使表达连贯自然。
+5. 规范标点与书面表达：补齐缺失标点，把口语里连续的「然后」「还有」按语义转为合适标点或连接词。
+6. 严格保留原意：不得添加原文没有的信息，不得删除实质内容，不得改变说话人的立场、语气（疑问/请求/命令/否定）与专有名词；英文技术术语保持原样。不确定的内容宁可保留原貌，不要臆测或改写。
+7. 输出格式：只输出润色后的文本本身。不要任何开场白、解释、markdown 标题、引号，也不要加「润色后：」之类的标签。`
+
 /** 判断语言码是否属于英文（en / en-US / en-GB …） */
 function isEnglishLang(lang: string | undefined): boolean {
   return /^en([-_]|$)/i.test(lang ?? '')
@@ -137,7 +155,7 @@ interface StatusInfo {
   platform: string
   recorder: { backend: string; available: boolean; nativeBinary: boolean }
   asr: { provider: string; available: boolean; language: string }
-  enhance: { enabled: boolean; provider: string; model: string; resolved: boolean }
+  enhance: { enabled: boolean; provider: string; model: string; mode: string; resolved: boolean }
   client: { fillMode: string; maxDurationSec: number; silenceStopSec: number; silenceThresholdDb: number }
 }
 
@@ -273,7 +291,7 @@ class VoiceEngine {
       platform,
       recorder: { backend: recorder, available: true, nativeBinary },
       asr: { provider: asrProvider, available: asrAvailable, language: this.config.asr.language, correction: this.config.asr.correction?.enabled ?? true },
-      enhance: { enabled: this.config.enhance.enabled, provider: this.config.enhance.provider, model: this.config.enhance.model, resolved },
+      enhance: { enabled: this.config.enhance.enabled, provider: this.config.enhance.provider, model: this.config.enhance.model, mode: this.config.enhance.mode ?? 'polish', resolved },
       client: {
         fillMode: this.config.client.fillMode,
         maxDurationSec: this.config.client.maxDurationSec,
@@ -442,14 +460,28 @@ Add-Type -AssemblyName System.Windows.Forms
   private async enhance(transcript: string, language: string, signal?: AbortSignal): Promise<{ enhanced: string; summary: string }> {
     if (!this.config.enhance.enabled) return { enhanced: transcript, summary: '' }
     const route = await this.resolveLlmRoute()
-    // 英文语音走润色增强（保持原意、优化表达），中文走结构化编程任务增强
     const isEn = isEnglishLang(language)
-    const system = isEn ? ENHANCE_SYSTEM_EN : ENHANCE_SYSTEM
+    const mode = this.config.enhance.mode ?? 'polish'
+    // 模式分派：
+    // - polish（默认）：中英文都只做口语清理 + 润色 + 保留原意，输出单段通顺文本，无 summary。
+    // - structured：中文转结构化编程任务（markdown 分节，含「一句话总结」→ summary），英文仍走润色。
+    let system: string
+    let extractSummary: boolean
+    if (mode === 'structured') {
+      system = isEn ? ENHANCE_SYSTEM_EN : ENHANCE_SYSTEM
+      extractSummary = !isEn
+    } else {
+      system = isEn ? ENHANCE_SYSTEM_EN : ENHANCE_SYSTEM_ZH_POLISH
+      extractSummary = false
+    }
+    // 确定性预过滤：润色模式（非英文）下先机械去除成串/句首句尾的纯语气字（呃/嗯/啊…，零语义损失），
+    // 语境依赖的口头禅（就是/然后/那个/之类的）与语病修补、流畅度增强交给 LLM，避免机械误删改意。
+    const input = !extractSummary && !isEn ? stripInterjections(transcript) : transcript
     const stream = this.ctx.llm.stream({
       provider: route.provider,
       model: route.model,
       system,
-      messages: [{ role: 'user', content: [{ type: 'text', text: transcript }] }],
+      messages: [{ role: 'user', content: [{ type: 'text', text: input }] }],
       temperature: 0.3,
       maxTokens: 1600,
       signal,
@@ -461,8 +493,8 @@ Add-Type -AssemblyName System.Windows.Forms
       throw new Error(`LLM 增强失败: ${finish.failure?.message ?? finish.kind}`)
     }
     const text = assembler.blocks().filter((b: any) => b.type === 'text').map((b: any) => b.text).join('')
-    if (isEn) {
-      // 英文增强：全文即增强结果，无 summary 结构
+    if (!extractSummary) {
+      // 润色模式（及英文）：全文即增强结果，无 summary 结构
       return { enhanced: text.trim() || transcript, summary: '' }
     }
     const m = text.match(/## 一句话总结\s*\n([\s\S]+?)(?:\n## |$)/)
@@ -851,7 +883,16 @@ export function apply(ctx: Context, config: Config) {
             let streamCounted = true
             let stdoutBuf = ''
             let finalized = false
+            let childExited = false
+            let enhancePending = false
             let closed = false
+            // 实时路径的 LLM 增强：final 之后可选跑 polish/structured，socket 需等增强完成再关闭
+            const enhanceAc = new AbortController()
+            const maybeEnd = () => {
+              if (!closed && finalized && !enhancePending && childExited) {
+                try { socket.end() } catch {}
+              }
+            }
             const send = (obj: unknown) => {
               if (closed || socket.destroyed) return
               try { socket.write(wsFrame(0x1, JSON.stringify(obj))) } catch {}
@@ -867,7 +908,26 @@ export function apply(ctx: Context, config: Config) {
                 try { m = JSON.parse(line) } catch { continue }
                 if (m.final) {
                   finalized = true
-                  send({ type: 'final', text: engine.correct(String(m.text ?? ''), lang), confidence: Number(m.confidence ?? 0) })
+                  if (idleTimer) clearTimeout(idleTimer) // final 后不再等音频，空闲定时器失效（避免误杀慢增强）
+                  const raw = engine.correct(String(m.text ?? ''), lang)
+                  const confidence = Number(m.confidence ?? 0)
+                  const emitFinal = (enhanced?: string) => {
+                    const payload: any = { type: 'final', text: raw, confidence }
+                    if (typeof enhanced === 'string' && enhanced.trim()) payload.enhanced = enhanced.trim()
+                    send(payload)
+                  }
+                  if (config.enhance.enabled && raw.trim()) {
+                    enhancePending = true
+                    // 增强安全超时：防止 LLM 挂起导致客户端「识别中」永久转圈（无工具级 timeout 兜底）
+                    const enhanceTimer = setTimeout(() => enhanceAc.abort(), 90000)
+                    engine.enhance(raw, lang, enhanceAc.signal)
+                      .then(e => emitFinal(e.enhanced))
+                      .catch(() => emitFinal()) // 增强失败/超时：降级为原样文本，不丢识别结果
+                      .finally(() => { clearTimeout(enhanceTimer); enhancePending = false; maybeEnd() })
+                  } else {
+                    emitFinal()
+                    maybeEnd()
+                  }
                 } else if (m.partial !== undefined) {
                   send({ type: 'partial', text: engine.correct(String(m.partial), lang) })
                 } else if (m.error) {
@@ -879,8 +939,13 @@ export function apply(ctx: Context, config: Config) {
             child.on('close', () => {
               if (streamCounted) { streamCounted = false; liveStreamCount-- }
               if (idleTimer) clearTimeout(idleTimer)
-              if (!closed && !finalized) send({ type: 'error', message: '识别进程意外退出' })
-              if (!closed) socket.end()
+              childExited = true
+              if (!closed && !finalized) {
+                send({ type: 'error', message: '识别进程意外退出' })
+                try { socket.end() } catch {}
+                return
+              }
+              maybeEnd()
             })
             child.stderr.on('data', () => { /* stderr 仅作诊断，不转发 */ })
 
@@ -891,6 +956,7 @@ export function apply(ctx: Context, config: Config) {
               idleTimer = setTimeout(() => {
                 if (!closed) {
                   closed = true
+                  enhanceAc.abort()
                   try { socket.end() } catch {}
                   child.kill('SIGKILL')
                 }
@@ -938,12 +1004,14 @@ export function apply(ctx: Context, config: Config) {
             socket.on('data', onData)
             socket.on('close', () => {
               closed = true
+              enhanceAc.abort()
               if (idleTimer) clearTimeout(idleTimer)
               socket.off('data', onData)
               child.kill('SIGKILL')
             })
             socket.on('error', () => {
               closed = true
+              enhanceAc.abort()
               child.kill('SIGKILL')
             })
           } catch (err: any) {
@@ -959,7 +1027,7 @@ export function apply(ctx: Context, config: Config) {
   // —— 语音工具（agent 可调用，实现 agent voice 编程）——
   ctx.tools.register(defineTool({
     name: 'voice_listen',
-    description: '通过系统原生麦克风录制用户语音并转文字，原样返回识别结果。调用前会播放提示音并用 TTS 提醒用户说话；说完停顿自动停止（或录满时长上限）。适合语音驱动编程：听取用户口述需求后继续编码。',
+    description: '通过系统原生麦克风录制用户语音并转文字，返回识别结果（开启 LLM 增强时返回润色/结构化后的文本）。调用前会播放提示音并用 TTS 提醒用户说话；说完停顿自动停止（或录满时长上限）。适合语音驱动编程：听取用户口述需求后继续编码。',
     parameters: {
       purpose: { type: 'string', description: '本轮录音的主题（如"修复登录超时问题"），用于 TTS 提示用户说什么' },
       durationSec: { type: 'integer', description: '最大录音秒数，默认取配置 record.maxDurationSec' },
@@ -981,7 +1049,7 @@ export function apply(ctx: Context, config: Config) {
       },
       render: (_args: unknown, value: any) => [{
         type: 'text',
-        text: value.transcript,
+        text: (typeof value.enhanced === 'string' && value.enhanced.trim()) ? value.enhanced : value.transcript,
       }],
     },
     timeoutMs: 360000,
@@ -993,7 +1061,7 @@ export function apply(ctx: Context, config: Config) {
 
   ctx.tools.register(defineTool({
     name: 'voice_ask',
-    description: '用 TTS 向用户语音提问，录制用户的语音回答并转文字，原样返回识别结果。用于语音双向对话：agent 边问边编程。',
+    description: '用 TTS 向用户语音提问，录制用户的语音回答并转文字，返回识别结果（开启 LLM 增强时返回润色/结构化后的回答）。用于语音双向对话：agent 边问边编程。',
     parameters: {
       question: { type: 'string', required: true, description: '要朗读给用户的问题' },
       language: { type: 'string', description: '识别语言，默认取配置 asr.language' },
@@ -1012,7 +1080,7 @@ export function apply(ctx: Context, config: Config) {
       },
       render: (_args: unknown, value: any) => [{
         type: 'text',
-        text: value.answer,
+        text: (typeof value.enhancedAnswer === 'string' && value.enhancedAnswer.trim()) ? value.enhancedAnswer : value.answer,
       }],
     },
     timeoutMs: 360000,
@@ -1024,7 +1092,7 @@ export function apply(ctx: Context, config: Config) {
 
   ctx.tools.register(defineTool({
     name: 'voice_transcribe',
-    description: '把本地音频文件（wav/aiff/m4a/mp3）转成文字，原样返回识别结果。用于处理用户已有的音频材料。',
+    description: '把本地音频文件（wav/aiff/m4a/mp3）转成文字，返回识别结果（开启 LLM 增强时返回润色/结构化后的文本）。用于处理用户已有的音频材料。',
     parameters: {
       filePath: { type: 'string', required: true, description: '音频文件绝对路径' },
       language: { type: 'string', description: '识别语言，默认取配置 asr.language' },
@@ -1044,7 +1112,7 @@ export function apply(ctx: Context, config: Config) {
       },
       render: (_args: unknown, value: any) => [{
         type: 'text',
-        text: value.text,
+        text: (typeof value.enhanced === 'string' && value.enhanced.trim()) ? value.enhanced : value.text,
       }],
     },
     timeoutMs: 600000,
@@ -1065,14 +1133,14 @@ export function apply(ctx: Context, config: Config) {
           platform: { type: 'string' },
           recorder: { type: 'object', properties: { backend: { type: 'string' }, available: { type: 'boolean' }, nativeBinary: { type: 'boolean' } }, additionalProperties: false },
           asr: { type: 'object', properties: { provider: { type: 'string' }, available: { type: 'boolean' }, language: { type: 'string' }, correction: { type: 'boolean' } }, additionalProperties: false },
-          enhance: { type: 'object', properties: { enabled: { type: 'boolean' }, provider: { type: 'string' }, model: { type: 'string' }, resolved: { type: 'boolean' } }, additionalProperties: false },
+          enhance: { type: 'object', properties: { enabled: { type: 'boolean' }, provider: { type: 'string' }, model: { type: 'string' }, mode: { type: 'string' }, resolved: { type: 'boolean' } }, additionalProperties: false },
           client: { type: 'object', properties: { fillMode: { type: 'string' }, maxDurationSec: { type: 'number' }, silenceStopSec: { type: 'number' }, silenceThresholdDb: { type: 'number' }, maxAudioBytes: { type: 'number' } }, additionalProperties: false },
         },
         additionalProperties: false,
       },
       render: (_args: unknown, value: any) => [{
         type: 'text',
-        text: `平台 ${value.platform} · 录音后端 ${value.recorder.backend}（可用 ${value.recorder.available}，原生二进制 ${value.recorder.nativeBinary}）\nASR ${value.asr.provider}（可用 ${value.asr.available}，语言 ${value.asr.language}）\nLLM 增强 ${value.enhance.enabled}（provider ${value.enhance.provider || 'auto'} / model ${value.enhance.model || 'auto'}）`,
+        text: `平台 ${value.platform} · 录音后端 ${value.recorder.backend}（可用 ${value.recorder.available}，原生二进制 ${value.recorder.nativeBinary}）\nASR ${value.asr.provider}（可用 ${value.asr.available}，语言 ${value.asr.language}）\nLLM 增强 ${value.enhance.enabled}（provider ${value.enhance.provider || 'auto'} / model ${value.enhance.model || 'auto'} / 模式 ${value.enhance.mode}）`,
       }],
     },
     timeoutMs: 30000,

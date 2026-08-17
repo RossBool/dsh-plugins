@@ -42,7 +42,7 @@ interface RecorderHandle {
 interface LiveSession {
   sendPcm: (pcm: Int16Array) => void
   end: () => void
-  done: Promise<{ text: string; confidence: number }>
+  done: Promise<{ text: string; confidence: number; enhanced?: string }>
   close: () => void
 }
 
@@ -61,12 +61,15 @@ function openLiveSession(language: string, onPartial: (t: string) => void): Prom
     // 否则 onClick 里 await openLiveSession 会永久挂起、录音结束后无人结算
     let settled = false
     let finished = false
-    const donePromise = new Promise<{ text: string; confidence: number }>((res, rej) => {
+    const donePromise = new Promise<{ text: string; confidence: number; enhanced?: string }>((res, rej) => {
       ws.onmessage = (ev) => {
         let m: any
         try { m = JSON.parse(ev.data) } catch { return }
         if (m.type === 'partial' && typeof m.text === 'string') onPartial(m.text)
-        else if (m.type === 'final') { finished = true; res({ text: String(m.text ?? ''), confidence: Number(m.confidence ?? 0) }) }
+        else if (m.type === 'final') {
+          finished = true
+          res({ text: String(m.text ?? ''), confidence: Number(m.confidence ?? 0), enhanced: typeof m.enhanced === 'string' ? m.enhanced : undefined })
+        }
         else if (m.type === 'error') { finished = true; rej(new Error(String(m.message ?? '实时识别失败'))) }
       }
       ws.onerror = () => {
@@ -561,10 +564,14 @@ function VoiceButton(props: any) {
     stopAcceptingPartial()
     try {
       if (sess) {
-        // 实时路径：录音已停止（end 已发），等待最终识别结果，原样填入
+        // 实时路径：录音已停止（end 已发），等待最终识别结果；fillMode=enhanced 且服务端返回增强文本时填入增强结果
         try {
           const result = await sess.done
-          const text = result.text?.trim()
+          const params = paramsRef.current
+          let text = result.text?.trim()
+          if (params.fillMode === 'enhanced' && result.enhanced && result.enhanced.trim()) {
+            text = result.enhanced.trim()
+          }
           if (!text) throw new Error('没有识别到语音内容，请重试')
           applyDraft(text)
         } catch (liveErr: any) {

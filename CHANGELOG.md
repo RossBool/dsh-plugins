@@ -11,6 +11,7 @@
 - Swift 新增 `stream` 子命令：stdin PCM → `SFSpeechRecognizer` 流式识别，实时输出 partial/final JSON。
 - 术语纠偏（`asr.correction`）三层：中文谐音映射（`道可`→Docker）、英文拼写规范化（`Doker`→Docker）、发音相近替代纠偏（`DC`→DeepSeek、`Honey`→Harness）。
 - 英文直接识别 + AI 增强两条处理路径：英文（`en-*`）不做谐音翻译，原样输出；开启 `enhance` 后走 LLM 润色/补全/优化表达。
+- AI 润色后处理（`enhance.mode: polish`，默认）：语音识别出原始文字稿后，调用 LLM 去口语化/口头禅/冗余词（呃/就是/之类的）+ 修补语病 + 增强流畅与逻辑，保留原意输出规范文本；确定性预过滤（`stripInterjections`）先删纯语气字，语义级冗余交 LLM。
 
 #### Changed
 - 录音默认仅手动关闭（`client.silenceStopSec: 0`，禁用静音自动停止），`maxDurationSec` 兜底。
